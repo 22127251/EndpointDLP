@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="AgentCore/AgentCore.csproj" />
+  <Project Path="ClipboardInterceptor/ClipboardInterceptor.csproj" />
+</Solution>

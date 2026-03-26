@@ -1,0 +1,55 @@
+pipe_name: "\\\\.\\pipe\\dlp_upload"
+timeout_seconds: 5
+fail_behavior: "block"        # "allow" or "block" on timeout/error
+temp_dir: "D:\\Code\\EndpointDLP\\tmp"  # empty string = use system %TEMP%
+min_upload_size_bytes: 1024   # ignore non-multipart bodies smaller than this
+
+# Domains to skip unconditionally (analytics, telemetry, logging)
+domain_blocklist:
+  - google-analytics.com
+  - analytics.google.com
+  - beacons.gcp.gvt2.com
+  - beacons.gvt2.com
+  - beacons3.gvt2.com
+  - ssl.gstatic.com
+
+# URL path/query keywords that signal a real upload endpoint.
+# Required (along with a filename signal) for non-multipart POST/PUT requests.
+upload_url_keywords:
+  - upload
+  - attach
+  - import
+
+# File type allow-list: a request is inspected if its filename extension OR
+# its effective MIME type matches. Leave both lists empty to inspect everything.
+extensions:
+  - .pdf
+  - .doc
+  - .docx
+  - .xls
+  - .xlsx
+  - .ppt
+  - .pptx
+  - .zip
+  - .rar
+  - .7z
+  - .tar
+  - .gz
+  - .csv
+  - .txt
+
+mime_types:
+  - application/pdf
+  - application/msword
+  - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+  - application/vnd.ms-excel
+  - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+  - application/vnd.ms-powerpoint
+  - application/vnd.openxmlformats-officedocument.presentationml.presentation
+  - application/zip
+  - application/x-rar-compressed
+  - application/x-7z-compressed
+  - application/x-tar
+  - application/gzip
+  - text/plain
+  - text/csv
