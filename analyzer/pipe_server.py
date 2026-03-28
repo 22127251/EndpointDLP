@@ -133,5 +133,14 @@ if __name__ == "__main__":
         default=os.path.join(_here, "policies.yaml"),
         help="Path to policies.yaml",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable DEBUG logging (per-request timing breakdown and recognizer hits)",
+    )
     args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     run(args.config, args.policies)

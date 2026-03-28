@@ -11,6 +11,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -100,7 +101,46 @@ class AnalyzerService:
             registry=registry,
             supported_languages=["en", "vi"],
         )
+
+        # Timing state — overwritten each request (safe because connections are serialized)
+        self._nlp_time_ms: float = 0.0
+        self._recognizer_timings: dict[str, tuple[int, float]] = {}  # name → (hits, ms)
+        self._install_timing_hooks()
+
         log.info("AnalyzerEngine ready.")
+
+    def _install_timing_hooks(self) -> None:
+        """Monkey-patch the NLP engine and each recognizer to record per-call timing."""
+
+        # --- NLP engine ---
+        nlp_engine = self._engine.nlp_engine
+        _original_process = nlp_engine.process_text
+
+        def _timed_process(text: str, language: str):
+            t0 = time.perf_counter()
+            result = _original_process(text, language)
+            self._nlp_time_ms = (time.perf_counter() - t0) * 1000
+            return result
+
+        nlp_engine.process_text = _timed_process
+
+        # --- Each recognizer ---
+        timings = self._recognizer_timings
+        for recognizer in self._engine.registry.recognizers:
+            _orig_analyze = recognizer.analyze
+            _name = recognizer.name
+
+            def _make_timed(orig, name):
+                def _timed_analyze(text, entities, nlp_artifacts):
+                    t0 = time.perf_counter()
+                    results = orig(text, entities, nlp_artifacts)
+                    elapsed = (time.perf_counter() - t0) * 1000
+                    timings[name] = (len(results), elapsed)
+                    return results
+                return _timed_analyze
+
+            recognizer.analyze = _make_timed(_orig_analyze, _name)
+            log.info("Loaded recognizer: %s", recognizer.name)
 
     def analyze(self, request: dict[str, Any]) -> AnalysisResult:
         chunk_id: str = request.get("chunk_id", "")
@@ -109,7 +149,9 @@ class AnalyzerService:
         channel: str = metadata.get("channel", "")
 
         # Detect language; fall back to configured default
+        _t_lingua = time.perf_counter()
         detected_lang = language_detector.detect(text, default=self._default_language)
+        lingua_ms = (time.perf_counter() - _t_lingua) * 1000
 
         # Policies applicable to this channel
         active_policies = [
@@ -133,11 +175,26 @@ class AnalyzerService:
                 applied_action="allow_no_log",
             )
 
+        self._recognizer_timings.clear()
+        _t_presidio = time.perf_counter()
         presidio_results = self._engine.analyze(
             text=text,
             language=detected_lang,
             entities=entity_ids,
         )
+        presidio_total_ms = (time.perf_counter() - _t_presidio) * 1000
+        recognizers_ms = presidio_total_ms - self._nlp_time_ms
+
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("chunk=%s lang=%s", chunk_id[:8], detected_lang)
+            log.debug("  lingua_detect: %6.1fms", lingua_ms)
+            log.debug("  stanza_nlp:  %7.1fms", self._nlp_time_ms)
+            log.debug("  recognizers: %7.1fms  (total)", max(recognizers_ms, 0.0))
+            for name, (hits, ms) in sorted(
+                self._recognizer_timings.items(), key=lambda x: -x[1][1]
+            ):
+                hit_label = f"{hits} hit{'s' if hits != 1 else ''}"
+                log.debug("    %-40s %6s  %5.1fms", name, hit_label, ms)
 
         # Group results by policy id
         groups: dict[str, list] = {}
