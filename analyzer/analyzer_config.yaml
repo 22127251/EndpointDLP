@@ -1,0 +1,7 @@
+pipe_name: "\\\\.\\pipe\\dlp_analyzer"
+default_language: vi        # fallback when Lingua cannot determine language
+stanza_models:
+  - lang_code: en
+    model_name: en
+  - lang_code: vi
+    model_name: vi

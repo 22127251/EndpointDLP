@@ -1,0 +1,5 @@
+presidio-analyzer>=2.2
+stanza>=1.9
+lingua-language-detector>=2.0
+pywin32>=306
+pyyaml>=6.0

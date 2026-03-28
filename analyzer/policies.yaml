@@ -1,0 +1,114 @@
+policies:
+
+  # --- Generic PII ---
+
+  - id: cc_numbers
+    name: Credit Card Numbers
+    channels: [clipboard, browser, peripheral]
+    action: block
+    type: regex
+    patterns:
+      - name: Visa
+        regex: "\\b4[0-9]{12}(?:[0-9]{3})?\\b"
+        score: 0.9
+      - name: Mastercard
+        regex: "\\b5[1-5][0-9]{14}\\b"
+        score: 0.9
+      - name: Amex
+        regex: "\\b3[47][0-9]{13}\\b"
+        score: 0.9
+    context: ["credit card", "thẻ tín dụng", "card number", "số thẻ"]
+
+  # --- NER-based ---
+
+  - id: personal_names_vi
+    name: Personal Names (Vietnamese)
+    channels: [clipboard, browser, peripheral]
+    action: allow_log
+    type: ner_entity
+    entity_types: [PERSON]
+    language: vi
+    min_score: 0.7
+
+  - id: personal_names_en
+    name: Personal Names (English)
+    channels: [clipboard, browser, peripheral]
+    action: allow_log
+    type: ner_entity
+    entity_types: [PERSON]
+    language: en
+    min_score: 0.7
+
+  - id: organizations_vi
+    name: Organizations (Vietnamese)
+    channels: [browser, peripheral]
+    action: allow_log
+    type: ner_entity
+    entity_types: [ORGANIZATION]
+    language: vi
+    min_score: 0.7
+
+  - id: organizations_en
+    name: Organizations (English)
+    channels: [browser, peripheral]
+    action: allow_log
+    type: ner_entity
+    entity_types: [ORGANIZATION]
+    language: en
+    min_score: 0.7
+
+  # --- Vietnamese PII ---
+
+  - id: vn_cccd
+    name: Vietnamese Citizen ID (CCCD / CMND)
+    channels: [clipboard, browser, peripheral]
+    action: block
+    type: regex
+    patterns:
+      - name: CCCD 12 digits
+        # Structure: province (0XX, codes 001-096) + gender/century (0-3) + birth year (2 digits) + sequence (6 digits)
+        regex: "\\b0[0-9]{2}[0-3][0-9]{2}[0-9]{6}\\b"
+        score: 0.6
+    context: ["CCCD", "căn cước", "căn cước công dân", "chứng minh nhân dân", "CMND", "số định danh", "định danh cá nhân"]
+
+  - id: vn_bhxh
+    name: Vietnamese Social / Health Insurance Number (BHXH / BHYT)
+    channels: [clipboard, browser, peripheral]
+    action: block
+    type: regex
+    patterns:
+      - name: BHXH/BHYT 10 digits
+        regex: "\\b[0-9]{10}\\b"
+        score: 0.5
+    context: ["BHXH", "BHYT", "bảo hiểm xã hội", "bảo hiểm y tế", "mã số BHXH", "sổ BHXH", "mã BHYT"]
+
+  - id: vn_tax_code
+    name: Vietnamese Tax Code (Mã số thuế)
+    channels: [clipboard, browser, peripheral]
+    action: block
+    type: regex
+    patterns:
+      - name: Tax code 10 digits
+        regex: "\\b[0-9]{10}\\b"
+        score: 0.5
+      - name: Subsidiary tax code (13 digits)
+        # Format: XXXXXXXXXX-XXX
+        regex: "\\b[0-9]{10}-[0-9]{3}\\b"
+        score: 0.85
+    context: ["mã số thuế", "MST", "mã thuế", "tax code", "mã số doanh nghiệp", "tax identification"]
+
+  # --- Keyword-based ---
+
+  - id: confidential_keywords
+    name: Confidential Keywords
+    channels: [clipboard, browser, peripheral]
+    action: block
+    type: denylist
+    deny_list:
+      - "confidential"
+      - "top secret"
+      - "strictly confidential"
+      - "mật"
+      - "bí mật"
+      - "tuyệt mật"
+      - "nội bộ"
