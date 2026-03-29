@@ -86,11 +86,21 @@ public sealed class ClipboardInterceptorService : IDisposable
             // Send clear priority queue signal first
             await SendClearPriorityQueueAsync(_currentMessageId!, ct);
 
-            // Send all chunks to QueueManager
+            // Send all chunks to QueueManager and collect decisions
             var timestamp = DateTime.UtcNow.ToString("o");
+            var overallDecision = "ALLOW";
+            
             for (int i = 0; i < chunks.Count; i++)
             {
-                await SendChunkAsync(chunks[i], i, chunks.Count, _currentMessageId!, timestamp, ct);
+                var decision = await SendChunkAsync(chunks[i], i, chunks.Count, _currentMessageId!, timestamp, ct);
+                
+                // Streaming: if any chunk is BLOCK, overall is BLOCK
+                if (decision == "BLOCK")
+                {
+                    overallDecision = "BLOCK";
+                    Console.WriteLine($"[DLP] Chunk {i + 1} BLOCKED");
+                    break;
+                }
             }
 
             // Discard stale decisions from superseded analyses
@@ -100,10 +110,18 @@ public sealed class ClipboardInterceptorService : IDisposable
                 return;
             }
 
-            // Always restore original content (decision is handled by QueueManager only)
-            _allowRestoreText = content;
-            SetOwnClipboardText(content);
-            Console.WriteLine("[DLP] Content restored. Check QueueManager for analysis.");
+            // Apply decision from QueueManager
+            if (overallDecision == "ALLOW")
+            {
+                _allowRestoreText = content;
+                SetOwnClipboardText(content);
+                Console.WriteLine("[DLP] Decision: ALLOW — original content restored.");
+            }
+            else
+            {
+                SetOwnClipboardText(BlockNotification);
+                Console.WriteLine("[DLP] Decision: BLOCK — content replaced with notification.");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -149,7 +167,7 @@ public sealed class ClipboardInterceptorService : IDisposable
         return chunks;
     }
 
-    private async Task SendChunkAsync(
+    private async Task<string> SendChunkAsync(
         string content, 
         int chunkId, 
         int totalChunks, 
@@ -171,8 +189,7 @@ public sealed class ClipboardInterceptorService : IDisposable
                 timestamp = timestamp
             };
 
-            await SendToPipeAsync(payload, ct);
-            Console.WriteLine($"[DLP] Sent chunk {chunkId + 1}/{totalChunks}");
+            return await SendToPipeAsync(payload, ct);
         }
         catch (OperationCanceledException)
         {
@@ -181,6 +198,7 @@ public sealed class ClipboardInterceptorService : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"[DLP] Failed to send chunk {chunkId + 1}: {ex.Message}");
+            return "ALLOW"; // Fail-open on error
         }
     }
 
@@ -205,9 +223,9 @@ public sealed class ClipboardInterceptorService : IDisposable
         }
     }
 
-    private static async Task SendToPipeAsync(object payload, CancellationToken ct)
+    private static async Task<string> SendToPipeAsync(object payload, CancellationToken ct)
     {
-        await Task.Run(() =>
+        return await Task.Run(() =>
         {
             try
             {
@@ -229,13 +247,21 @@ public sealed class ClipboardInterceptorService : IDisposable
                 pipeClient.Write(bytes, 0, bytes.Length);
                 pipeClient.Flush();
 
-                // Read and discard response (we don't use it)
+                // Read response
                 var responseBuffer = new byte[64 * 1024];
-                _ = pipeClient.Read(responseBuffer, 0, responseBuffer.Length);
+                var bytesRead = pipeClient.Read(responseBuffer, 0, responseBuffer.Length);
+
+                var response = Encoding.UTF8.GetString(responseBuffer, 0, bytesRead).Trim().ToUpper();
+                
+                if (response != "ALLOW" && response != "BLOCK")
+                    throw new InvalidOperationException($"Unexpected response: {response}");
+
+                return response;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[DLP] Pipe error: {ex.Message}");
+                return "ALLOW"; // Fail-open on error
             }
         }, ct);
     }

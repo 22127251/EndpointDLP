@@ -166,12 +166,25 @@ public class ChunkPipeServer : IDisposable
                 if (immediateDecision != null)
                 {
                     _queueManager.RecordChunkDecision(chunk.MessageId, chunk.ChunkId, immediateDecision, chunk.Content);
+                    Console.WriteLine($"[PipeServer] Chunk {chunk.ChunkId + 1}/{chunk.TotalChunks}: {immediateDecision} (cached)");
                     return immediateDecision;
                 }
 
-                // Enqueue for interactive analysis
-                _queueManager.Enqueue(chunk);
-                return "ALLOW";
+                // Analyze chunk interactively (ask user a/b)
+                var decision = await AnalyzeChunkInteractivelyAsync(chunk, ct);
+                
+                // Record decision
+                var (_, overallDecision, _) = _queueManager.RecordChunkDecision(
+                    chunk.MessageId, chunk.ChunkId, decision, chunk.Content);
+                
+                Console.WriteLine($"[PipeServer] Chunk {chunk.ChunkId + 1}/{chunk.TotalChunks}: {decision}");
+                
+                if (overallDecision != null)
+                {
+                    Console.WriteLine($"[PipeServer] Message {chunk.MessageId} complete: {overallDecision}");
+                }
+                
+                return decision;
             }
 
             // Legacy payload
@@ -182,6 +195,66 @@ public class ChunkPipeServer : IDisposable
             Console.WriteLine($"[PipeServer] Parse error: {ex.Message}");
             return "ALLOW";
         }
+    }
+
+    private async Task<string> AnalyzeChunkInteractivelyAsync(Chunk chunk, CancellationToken ct)
+    {
+        // Show chunk preview
+        var preview = chunk.Content.Length > 150 
+            ? chunk.Content[..150] + "..." 
+            : chunk.Content;
+        
+        Console.WriteLine();
+        Console.WriteLine($"????????????????????????????????????????????????????????????");
+        Console.WriteLine($"?  Chunk {chunk.ChunkId + 1,2}/{chunk.TotalChunks} | Message: {chunk.MessageId[..Math.Min(20, chunk.MessageId.Length)]}...");
+        Console.WriteLine($"?  Channel: {chunk.Channel,-10} | Priority: {chunk.Priority,-5} | Words: {chunk.WordCount}");
+        Console.WriteLine($"????????????????????????????????????????????????????????????");
+        Console.WriteLine($"?  {preview.Replace("\n", " ").Replace("\r", " ")}");
+        Console.WriteLine($"????????????????????????????????????????????????????????????");
+        Console.WriteLine();
+        Console.Write("[a]llow | [b]lock | [q]uit > ");
+
+        // Read user input
+        var decision = await ReadUserDecisionAsync(ct);
+        
+        if (decision == null)
+        {
+            Console.WriteLine("[PipeServer] Analysis cancelled, defaulting to ALLOW");
+            return "ALLOW";
+        }
+
+        var decisionStr = decision == 'a' ? "ALLOW" : "BLOCK";
+        
+        if (decisionStr == "ALLOW" && chunk.ChunkId == chunk.TotalChunks - 1)
+        {
+            // Last chunk allowed - show reconstructed text
+            Console.WriteLine("[PipeServer] All chunks ALLOWED");
+        }
+        else if (decisionStr == "BLOCK")
+        {
+            Console.WriteLine("[PipeServer] Chunk BLOCKED - message will be blocked");
+        }
+
+        return decisionStr;
+    }
+
+    private Task<char?> ReadUserDecisionAsync(CancellationToken ct)
+    {
+        return Task.Run(() =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                if (Console.KeyAvailable)
+                {
+                    var key = Console.ReadKey(intercept: true).KeyChar.ToString().ToLower();
+                    if (key == "a") return (char?)'a';
+                    if (key == "b") return (char?)'b';
+                    if (key == "q") return null;
+                }
+                Thread.Sleep(50);
+            }
+            return null;
+        }, ct);
     }
 
     public void Dispose()
