@@ -39,9 +39,10 @@ _cfg: Config = Config()
 # Resumable upload tracking
 _pending_resumable: dict = {}   # flow id → filename
 _resumable_filenames: dict = {} # upload_id → filename
-_blocked_url_cache: dict = {}   # url → expiry_time
+# URL block cache disabled - each upload should be analyzed independently
+_blocked_url_cache: dict = {}   # url → expiry_time (DISABLED)
 _blocked_url_cache_lock = threading.Lock()
-_BLOCK_CACHE_TTL = 60.0
+_BLOCK_CACHE_TTL = 0.0  # Disabled - no caching of blocked URLs
 
 # Track message decisions for browser uploads
 _browser_decisions: dict = {}  # message_id -> "ALLOW" or "BLOCK"
@@ -173,8 +174,8 @@ def request(flow: http.HTTPFlow) -> None:
 
 def _handle_upload_with_queue_analysis(flow: http.HTTPFlow, filename: str, body: bytes, mime: str, url: str) -> None:
     """
-    New workflow: Save file to temp, send path to QueueManager.
-    QueueManager will: extract text → chunk → analyze → return decision.
+    Simple workflow: Save file to tmp, send path to QueueManager.
+    QueueManager will: read file → decode base64 if needed → chunk → analyze.
     """
     try:
         temp_path = _write_temp_file(body, filename)
@@ -185,9 +186,9 @@ def _handle_upload_with_queue_analysis(flow: http.HTTPFlow, filename: str, body:
             flow.response = http.Response.make(403, b"DLP Error: Cannot create temp file", {"Content-Type": "text/plain"})
         return
 
-    # Send temp path to QueueManager for analysis
+    # Send temp path to QueueManager for full analysis
     payload = {
-        "action": "analyze_file",
+        "action": "analyze_file_at_path",
         "temp_path": temp_path,
         "filename": filename,
         "url": url,
@@ -203,9 +204,12 @@ def _handle_upload_with_queue_analysis(flow: http.HTTPFlow, filename: str, body:
         decision = pipe_client.send_and_receive(
             payload,
             _cfg.pipe_name,
-            _cfg.timeout_seconds,
+            _cfg.timeout_seconds * 20,  # Long timeout for file analysis
         )
         log.info("QueueManager decision: %s for %s", decision, filename)
+    except TimeoutError as e:
+        log.error("Pipe timeout: %s → fail_%s", e, _cfg.fail_behavior)
+        decision = "ALLOW" if _cfg.fail_open() else "BLOCK"
     except Exception as e:
         log.warning("Pipe error: %s → fail_%s", e, _cfg.fail_behavior)
         decision = "ALLOW" if _cfg.fail_open() else "BLOCK"
@@ -217,8 +221,6 @@ def _handle_upload_with_queue_analysis(flow: http.HTTPFlow, filename: str, body:
         flow.response = http.Response.make(403, b"Upload blocked by DLP policy.", {"Content-Type": "text/plain"})
     else:
         log.info("ALLOW | %s | %d bytes | %s", filename, len(body), url)
-        # File already uploaded (mitmproxy passed it through)
-        # Decision is logged for audit
 
 
 def _is_text_file(filename: str, mime: str) -> bool:
@@ -282,14 +284,46 @@ def _extract_text_from_file(body: bytes, filename: str, mime: str) -> str:
 
 
 def _extract_text_plain(body: bytes) -> str:
-    """Extract text from plain text file."""
-    encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252']
+    """Extract text from plain text file with proper encoding detection."""
+    # Try UTF-8 with BOM first (common for Vietnamese text)
+    encodings = ['utf-8-sig', 'utf-8', 'cp1252', 'latin-1']
+    
     for encoding in encodings:
         try:
-            return body.decode(encoding)
+            decoded = body.decode(encoding)
+            # Check if result looks like base64 (all ASCII, no spaces/newlines typical of text)
+            if _looks_like_base64(decoded):
+                # Try to decode base64 and then decode as UTF-8
+                try:
+                    import base64
+                    decoded_bytes = base64.b64decode(decoded)
+                    return decoded_bytes.decode('utf-8')
+                except:
+                    pass  # Not actually base64, return original
+            return decoded
         except (UnicodeDecodeError, LookupError):
             continue
+    
+    # Fallback: replace errors
     return body.decode('utf-8', errors='replace')
+
+
+def _looks_like_base64(text: str) -> bool:
+    """Check if text looks like base64 encoded content."""
+    if len(text) < 100:
+        return False
+    
+    # Base64 typically has long lines without spaces
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if len(line) > 50 and ' ' not in line:
+            # Check if mostly base64 characters
+            base64_chars = set('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+            if all(c in base64_chars for c in line[:100]):
+                return True
+    
+    return False
 
 
 def _extract_text_docx(body: bytes) -> str:

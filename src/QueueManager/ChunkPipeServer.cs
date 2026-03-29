@@ -169,6 +169,20 @@ public class ChunkPipeServer : IDisposable
                 return await AnalyzeFileAsync(root, ct);
             }
 
+            // Check for extracted text analysis request (Python mitmproxy extracts text)
+            if (root.TryGetProperty("action", out var actionProp3) &&
+                actionProp3.GetString() == "analyze_extracted_text")
+            {
+                return await AnalyzeExtractedTextAsync(root, ct);
+            }
+
+            // Check for file at path analysis request (new simple workflow)
+            if (root.TryGetProperty("action", out var actionProp4) &&
+                actionProp4.GetString() == "analyze_file_at_path")
+            {
+                return await AnalyzeFileAtPathAsync(root, ct);
+            }
+
             // Check for chunk payload
             if (root.TryGetProperty("channel", out var channelProp) &&
                 root.TryGetProperty("chunk_id", out var chunkIdProp))
@@ -357,6 +371,302 @@ public class ChunkPipeServer : IDisposable
         }
     }
 
+    private async Task<string> AnalyzeExtractedTextAsync(JsonElement root, CancellationToken ct)
+    {
+        var textContent = root.TryGetProperty("text_content", out var tc) ? tc.GetString() ?? "" : "";
+        var filename = root.TryGetProperty("filename", out var fn) ? fn.GetString() ?? "" : "unknown";
+        var url = root.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "";
+        var tempPath = root.TryGetProperty("temp_path", out var tp) ? tp.GetString() ?? "" : "";
+
+        Console.WriteLine();
+        Console.WriteLine($"=================================================================");
+        Console.WriteLine($"  FILE ANALYSIS REQUEST");
+        Console.WriteLine($"  File: {filename}");
+        Console.WriteLine($"  Text length: {textContent.Length} characters");
+        Console.WriteLine($"=================================================================");
+        Console.WriteLine();
+
+        if (string.IsNullOrWhiteSpace(textContent))
+        {
+            Console.WriteLine($"[FileAnalysis] No text content to analyze in {filename}");
+            return "ALLOW";
+        }
+
+        try
+        {
+            // Chunk the text (500 words per chunk, 50 words overlap)
+            var chunks = ChunkText(textContent, 500, 50);
+            Console.WriteLine($"[FileAnalysis] Chunked into {chunks.Count} pieces (500 words each)");
+
+            if (chunks.Count == 0)
+            {
+                return "ALLOW";
+            }
+
+            // Generate message ID
+            var messageId = $"file_{Path.GetFileName(filename)}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+
+            // Analyze each chunk
+            var overallDecision = "ALLOW";
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                var chunk = new Chunk
+                {
+                    Channel = "browser",
+                    Priority = false,
+                    MessageId = messageId,
+                    ChunkId = i,
+                    TotalChunks = chunks.Count,
+                    Content = chunks[i],
+                    WordCount = chunks[i].Split(' ', StringSplitOptions.RemoveEmptyEntries).Length,
+                    SourceUrl = url,
+                    Filename = filename,
+                    Timestamp = DateTime.UtcNow.ToString("o") + "Z"
+                };
+
+                // Initialize tracking
+                if (i == 0)
+                {
+                    _queueManager.InitializeMessageTracking(messageId, chunks.Count, "browser");
+                }
+
+                // Check for cached decision
+                var cachedDecision = _queueManager.GetImmediateDecision(messageId);
+                if (cachedDecision != null)
+                {
+                    _queueManager.RecordChunkDecision(messageId, i, cachedDecision, chunk.Content);
+                    Console.WriteLine($"[FileAnalysis] Chunk {i + 1}/{chunks.Count}: {cachedDecision} (cached)");
+                    overallDecision = cachedDecision;
+                    if (cachedDecision == "BLOCK") break;
+                    continue;
+                }
+
+                // Analyze interactively
+                var decision = await AnalyzeChunkInteractivelyAsync(chunk, ct);
+                
+                if (decision == null)
+                {
+                    decision = "ALLOW"; // User cancelled
+                }
+
+                var (_, chunkOverallDecision, _) = _queueManager.RecordChunkDecision(
+                    messageId, i, decision, chunk.Content);
+
+                Console.WriteLine($"[FileAnalysis] Chunk {i + 1}/{chunks.Count}: {decision}");
+
+                if (chunkOverallDecision != null)
+                {
+                    overallDecision = chunkOverallDecision;
+                    Console.WriteLine($"[FileAnalysis] Message {messageId} complete: {overallDecision}");
+                    if (overallDecision == "BLOCK") break;
+                }
+
+                if (decision == "BLOCK")
+                {
+                    overallDecision = "BLOCK";
+                    break;
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"[FileAnalysis] Final decision for {filename}: {overallDecision}");
+            
+            // Cleanup temp file
+            if (!string.IsNullOrEmpty(tempPath) && File.Exists(tempPath))
+            {
+                try
+                {
+                    File.Delete(tempPath);
+                    Console.WriteLine($"[FileAnalysis] Cleaned up temp file: {tempPath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[FileAnalysis] Could not delete temp file: {ex.Message}");
+                }
+            }
+
+            return overallDecision;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FileAnalysis] Error: {ex.Message}");
+            return "ALLOW"; // Fail open
+        }
+    }
+
+    private async Task<string> AnalyzeFileAtPathAsync(JsonElement root, CancellationToken ct)
+    {
+        var tempPath = root.TryGetProperty("temp_path", out var tp) ? tp.GetString() ?? "" : "";
+        var filename = root.TryGetProperty("filename", out var fn) ? fn.GetString() ?? "" : "unknown";
+        var url = root.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "";
+
+        Console.WriteLine();
+        Console.WriteLine($"=================================================================");
+        Console.WriteLine($"  FILE ANALYSIS REQUEST");
+        Console.WriteLine($"  File: {filename}");
+        Console.WriteLine($"  Path: {tempPath}");
+        Console.WriteLine($"=================================================================");
+        Console.WriteLine();
+
+        if (!File.Exists(tempPath))
+        {
+            Console.WriteLine($"[FileAnalysis] File not found: {tempPath}");
+            return "ALLOW"; // Fail open
+        }
+
+        try
+        {
+            // Read file content
+            var fileContent = File.ReadAllText(tempPath);
+            
+            // Check if content is base64 and decode
+            if (_looksLikeBase64(fileContent))
+            {
+                Console.WriteLine($"[FileAnalysis] Detected base64 content, decoding...");
+                try
+                {
+                    var decodedBytes = Convert.FromBase64String(fileContent);
+                    fileContent = Encoding.UTF8.GetString(decodedBytes);
+                    Console.WriteLine($"[FileAnalysis] Decoded {decodedBytes.Length} bytes of UTF-8 text");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[FileAnalysis] Base64 decode failed: {ex.Message}");
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(fileContent))
+            {
+                Console.WriteLine($"[FileAnalysis] No text content in {filename}");
+                return "ALLOW";
+            }
+
+            Console.WriteLine($"[FileAnalysis] File content length: {fileContent.Length} chars");
+            Console.WriteLine($"[FileAnalysis] Starting to chunk text...");
+            
+            // Chunk the text (500 words per chunk, 50 words overlap)
+            var chunks = ChunkText(fileContent, 500, 50);
+            Console.WriteLine($"[FileAnalysis] Chunked into {chunks.Count} pieces (500 words each)");
+
+            if (chunks.Count == 0)
+            {
+                Console.WriteLine($"[FileAnalysis] No chunks created");
+                return "ALLOW";
+            }
+
+            // Generate message ID
+            var messageId = $"file_{Path.GetFileName(filename)}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+
+            // Analyze each chunk
+            var overallDecision = "ALLOW";
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                var chunk = new Chunk
+                {
+                    Channel = "browser",
+                    Priority = false,
+                    MessageId = messageId,
+                    ChunkId = i,
+                    TotalChunks = chunks.Count,
+                    Content = chunks[i],
+                    WordCount = chunks[i].Split(' ', StringSplitOptions.RemoveEmptyEntries).Length,
+                    SourceUrl = url,
+                    Filename = filename,
+                    Timestamp = DateTime.UtcNow.ToString("o") + "Z"
+                };
+
+                // Initialize tracking
+                if (i == 0)
+                {
+                    _queueManager.InitializeMessageTracking(messageId, chunks.Count, "browser");
+                }
+
+                // Check for cached decision
+                var cachedDecision = _queueManager.GetImmediateDecision(messageId);
+                if (cachedDecision != null)
+                {
+                    _queueManager.RecordChunkDecision(messageId, i, cachedDecision, chunk.Content);
+                    Console.WriteLine($"[FileAnalysis] Chunk {i + 1}/{chunks.Count}: {cachedDecision} (cached)");
+                    overallDecision = cachedDecision;
+                    if (cachedDecision == "BLOCK") break;
+                    continue;
+                }
+
+                // Analyze interactively
+                var decision = await AnalyzeChunkInteractivelyAsync(chunk, ct);
+                
+                if (decision == null)
+                {
+                    decision = "ALLOW"; // User cancelled
+                }
+
+                var (_, chunkOverallDecision, _) = _queueManager.RecordChunkDecision(
+                    messageId, i, decision, chunk.Content);
+
+                Console.WriteLine($"[FileAnalysis] Chunk {i + 1}/{chunks.Count}: {decision}");
+
+                if (chunkOverallDecision != null)
+                {
+                    overallDecision = chunkOverallDecision;
+                    Console.WriteLine($"[FileAnalysis] Message {messageId} complete: {overallDecision}");
+                    if (overallDecision == "BLOCK") break;
+                }
+
+                if (decision == "BLOCK")
+                {
+                    overallDecision = "BLOCK";
+                    break;
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"[FileAnalysis] Final decision for {filename}: {overallDecision}");
+            
+            // Cleanup temp file
+            try
+            {
+                File.Delete(tempPath);
+                Console.WriteLine($"[FileAnalysis] Cleaned up temp file: {tempPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FileAnalysis] Could not delete temp file: {ex.Message}");
+            }
+
+            return overallDecision;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FileAnalysis] Error: {ex.Message}");
+            return "ALLOW"; // Fail open
+        }
+    }
+
+    private bool _looksLikeBase64(string text)
+    {
+        if (string.IsNullOrEmpty(text) || text.Length < 50)
+            return false;
+        
+        // Check first 500 chars for base64 pattern
+        var sample = text.Length > 500 ? text.Substring(0, 500) : text;
+        
+        // Base64 chars only
+        var base64Chars = new HashSet<char>("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=");
+        
+        // Remove newlines and whitespace for checking
+        var noWhitespace = new string(sample.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        
+        if (noWhitespace.Length < 50)
+            return false;
+        
+        // Count base64 chars
+        var base64Count = noWhitespace.Count(c => base64Chars.Contains(c));
+        var ratio = (double)base64Count / noWhitespace.Length;
+        
+        // If >95% are base64 chars, it's likely base64
+        return ratio > 0.95;
+    }
+
     private string ExtractTextFromFile(string path, string filename)
     {
         var ext = Path.GetExtension(filename).ToLowerInvariant();
@@ -385,7 +695,11 @@ public class ChunkPipeServer : IDisposable
     private List<string> ChunkText(string text, int chunkSizeWords, int overlapWords)
     {
         var chunks = new List<string>();
-        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        
+        // Split by any whitespace (spaces, tabs, newlines) - works with Unicode
+        var words = text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+        
+        Console.WriteLine($"[ChunkText] Found {words.Length} words in text");
 
         if (words.Length <= chunkSizeWords)
         {
@@ -394,15 +708,19 @@ public class ChunkPipeServer : IDisposable
         }
 
         var start = 0;
-        while (start < words.Length)
+        var chunkCount = 0;
+        while (start < words.Length && chunkCount < 1000) // Safety limit
         {
             var end = Math.Min(start + chunkSizeWords, words.Length);
             var chunkWords = words.Skip(start).Take(end - start).ToArray();
             chunks.Add(string.Join(" ", chunkWords));
-
+            
             start = end - overlapWords;
             if (start >= words.Length) break;
+            chunkCount++;
         }
+        
+        Console.WriteLine($"[ChunkText] Created {chunks.Count} chunks with safety limit");
 
         return chunks;
     }
