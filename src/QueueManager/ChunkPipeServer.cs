@@ -79,15 +79,39 @@ public class ChunkPipeServer : IDisposable
     {
         try
         {
-            var buffer = new byte[64 * 1024];
-            var bytesRead = await pipe.ReadAsync(buffer, 0, buffer.Length, ct);
+            // Use larger buffer for chunk payloads (up to 10MB)
+            var buffer = new byte[10 * 1024 * 1024];
+            var totalBytesRead = 0;
 
-            if (bytesRead == 0)
+            // Read all available data (may come in multiple chunks)
+            while (pipe.IsConnected && !ct.IsCancellationRequested)
+            {
+                var bytesRead = await pipe.ReadAsync(buffer, totalBytesRead, buffer.Length - totalBytesRead, ct);
+                if (bytesRead == 0)
+                {
+                    break; // End of stream
+                }
+                totalBytesRead += bytesRead;
+
+                // Check if we have a complete JSON message (ends with })
+                if (totalBytesRead > 0)
+                {
+                    var tempStr = Encoding.UTF8.GetString(buffer, 0, totalBytesRead);
+                    if (tempStr.TrimEnd().EndsWith("}"))
+                    {
+                        break; // Complete message received
+                    }
+                }
+            }
+
+            if (totalBytesRead == 0)
             {
                 return;
             }
 
-            var json = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+            var json = Encoding.UTF8.GetString(buffer, 0, totalBytesRead);
+            Console.WriteLine($"[PipeServer] Received {totalBytesRead} bytes from pipe");
+            
             var response = await ProcessPayloadAsync(json, ct);
 
             // Send response (client may have already disconnected - that's OK)
@@ -113,6 +137,7 @@ public class ChunkPipeServer : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"[PipeServer] Handler error: {ex.Message}");
+            Console.WriteLine($"[PipeServer] Stack: {ex.StackTrace}");
         }
         finally
         {
@@ -135,6 +160,13 @@ public class ChunkPipeServer : IDisposable
                 var messageId = root.GetProperty("message_id").GetString() ?? "";
                 _queueManager.ClearPriorityQueue(messageId);
                 return "ALLOW";
+            }
+
+            // Check for file analysis request (new workflow)
+            if (root.TryGetProperty("action", out var actionProp2) &&
+                actionProp2.GetString() == "analyze_file")
+            {
+                return await AnalyzeFileAsync(root, ct);
             }
 
             // Check for chunk payload
@@ -172,18 +204,18 @@ public class ChunkPipeServer : IDisposable
 
                 // Analyze chunk interactively (ask user a/b)
                 var decision = await AnalyzeChunkInteractivelyAsync(chunk, ct);
-                
+
                 // Record decision
                 var (_, overallDecision, _) = _queueManager.RecordChunkDecision(
                     chunk.MessageId, chunk.ChunkId, decision, chunk.Content);
-                
+
                 Console.WriteLine($"[PipeServer] Chunk {chunk.ChunkId + 1}/{chunk.TotalChunks}: {decision}");
-                
+
                 if (overallDecision != null)
                 {
                     Console.WriteLine($"[PipeServer] Message {chunk.MessageId} complete: {overallDecision}");
                 }
-                
+
                 return decision;
             }
 
@@ -195,6 +227,183 @@ public class ChunkPipeServer : IDisposable
             Console.WriteLine($"[PipeServer] Parse error: {ex.Message}");
             return "ALLOW";
         }
+    }
+
+    private async Task<string> AnalyzeFileAsync(JsonElement root, CancellationToken ct)
+    {
+        var tempPath = root.TryGetProperty("temp_path", out var tp) ? tp.GetString() ?? "" : "";
+        var filename = root.TryGetProperty("filename", out var fn) ? fn.GetString() ?? "" : "unknown";
+        var url = root.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "";
+
+        Console.WriteLine();
+        Console.WriteLine($"????????????????????????????????????????????????????????????");
+        Console.WriteLine($"?  FILE ANALYSIS REQUEST                                  ?");
+        Console.WriteLine($"?  File: {filename,-50} ?");
+        Console.WriteLine($"?  Path: {tempPath,-50} ?");
+        Console.WriteLine($"????????????????????????????????????????????????????????????");
+        Console.WriteLine();
+
+        if (!File.Exists(tempPath))
+        {
+            Console.WriteLine($"[FileAnalysis] File not found: {tempPath}");
+            return "ALLOW"; // Fail open
+        }
+
+        try
+        {
+            // Extract text from file
+            var text = ExtractTextFromFile(tempPath, filename);
+            
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                Console.WriteLine($"[FileAnalysis] No text extracted from {filename}");
+                return "ALLOW"; // No content to analyze
+            }
+
+            // Chunk the text
+            var chunks = ChunkText(text, 500, 50); // 500 words per chunk, 50 words overlap
+            Console.WriteLine($"[FileAnalysis] Extracted {text.Length} chars, chunked into {chunks.Count} pieces");
+
+            if (chunks.Count == 0)
+            {
+                return "ALLOW";
+            }
+
+            // Generate message ID
+            var messageId = $"file_{Path.GetFileName(tempPath)}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+
+            // Analyze each chunk
+            var overallDecision = "ALLOW";
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                var chunk = new Chunk
+                {
+                    Channel = "browser",
+                    Priority = false,
+                    MessageId = messageId,
+                    ChunkId = i,
+                    TotalChunks = chunks.Count,
+                    Content = chunks[i],
+                    WordCount = chunks[i].Split(' ', StringSplitOptions.RemoveEmptyEntries).Length,
+                    SourceUrl = url,
+                    Filename = filename,
+                    Timestamp = DateTime.UtcNow.ToString("o") + "Z"
+                };
+
+                // Initialize tracking
+                if (i == 0)
+                {
+                    _queueManager.InitializeMessageTracking(messageId, chunks.Count, "browser");
+                }
+
+                // Check for cached decision
+                var cachedDecision = _queueManager.GetImmediateDecision(messageId);
+                if (cachedDecision != null)
+                {
+                    _queueManager.RecordChunkDecision(messageId, i, cachedDecision, chunk.Content);
+                    Console.WriteLine($"[FileAnalysis] Chunk {i + 1}/{chunks.Count}: {cachedDecision} (cached)");
+                    overallDecision = cachedDecision;
+                    if (cachedDecision == "BLOCK") break;
+                    continue;
+                }
+
+                // Analyze interactively
+                var decision = await AnalyzeChunkInteractivelyAsync(chunk, ct);
+                
+                if (decision == null)
+                {
+                    decision = "ALLOW"; // User cancelled
+                }
+
+                var (_, chunkOverallDecision, _) = _queueManager.RecordChunkDecision(
+                    messageId, i, decision, chunk.Content);
+
+                Console.WriteLine($"[FileAnalysis] Chunk {i + 1}/{chunks.Count}: {decision}");
+
+                if (chunkOverallDecision != null)
+                {
+                    overallDecision = chunkOverallDecision;
+                    Console.WriteLine($"[FileAnalysis] Message {messageId} complete: {overallDecision}");
+                    if (overallDecision == "BLOCK") break;
+                }
+
+                if (decision == "BLOCK")
+                {
+                    overallDecision = "BLOCK";
+                    break;
+                }
+            }
+
+            Console.WriteLine();
+            Console.WriteLine($"[FileAnalysis] Final decision for {filename}: {overallDecision}");
+            
+            // Cleanup temp file
+            try
+            {
+                File.Delete(tempPath);
+                Console.WriteLine($"[FileAnalysis] Cleaned up temp file: {tempPath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FileAnalysis] Could not delete temp file: {ex.Message}");
+            }
+
+            return overallDecision;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FileAnalysis] Error: {ex.Message}");
+            return "ALLOW"; // Fail open
+        }
+    }
+
+    private string ExtractTextFromFile(string path, string filename)
+    {
+        var ext = Path.GetExtension(filename).ToLowerInvariant();
+        
+        try
+        {
+            // Plain text files
+            if (ext is ".txt" or ".csv" or ".md" or ".json" or ".xml" or ".html" or ".htm" or ".log")
+            {
+                return File.ReadAllText(path);
+            }
+            
+            // For Office/PDF/Archives, we need Python interop or external libraries
+            // For now, try to read as text
+            var content = File.ReadAllText(path);
+            return content;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[FileAnalysis] Failed to extract text from {filename}: {ex.Message}");
+            return "";
+        }
+    }
+
+    private List<string> ChunkText(string text, int chunkSizeWords, int overlapWords)
+    {
+        var chunks = new List<string>();
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+        if (words.Length <= chunkSizeWords)
+        {
+            chunks.Add(text);
+            return chunks;
+        }
+
+        var start = 0;
+        while (start < words.Length)
+        {
+            var end = Math.Min(start + chunkSizeWords, words.Length);
+            var chunkWords = words.Skip(start).Take(end - start).ToArray();
+            chunks.Add(string.Join(" ", chunkWords));
+
+            start = end - overlapWords;
+            if (start >= words.Length) break;
+        }
+
+        return chunks;
     }
 
     private async Task<string> AnalyzeChunkInteractivelyAsync(Chunk chunk, CancellationToken ct)
