@@ -363,15 +363,16 @@ public class ChunkPipeServer : IDisposable
         
         try
         {
-            // Plain text files
+            // Plain text files - read with UTF-8 encoding
             if (ext is ".txt" or ".csv" or ".md" or ".json" or ".xml" or ".html" or ".htm" or ".log")
             {
-                return File.ReadAllText(path);
+                // Try reading with UTF-8 first (with BOM detection)
+                return File.ReadAllText(path, System.Text.Encoding.UTF8);
             }
             
             // For Office/PDF/Archives, we need Python interop or external libraries
-            // For now, try to read as text
-            var content = File.ReadAllText(path);
+            // For now, try to read as text with UTF-8
+            var content = File.ReadAllText(path, System.Text.Encoding.UTF8);
             return content;
         }
         catch (Exception ex)
@@ -408,24 +409,22 @@ public class ChunkPipeServer : IDisposable
 
     private async Task<string> AnalyzeChunkInteractivelyAsync(Chunk chunk, CancellationToken ct)
     {
-        // Show chunk preview
-        var preview = chunk.Content.Length > 150 
-            ? chunk.Content[..150] + "..." 
-            : chunk.Content;
-        
+        // Show full chunk content
+        var content = chunk.Content;
+
         Console.WriteLine();
-        Console.WriteLine($"????????????????????????????????????????????????????????????");
-        Console.WriteLine($"?  Chunk {chunk.ChunkId + 1,2}/{chunk.TotalChunks} | Message: {chunk.MessageId[..Math.Min(20, chunk.MessageId.Length)]}...");
-        Console.WriteLine($"?  Channel: {chunk.Channel,-10} | Priority: {chunk.Priority,-5} | Words: {chunk.WordCount}");
-        Console.WriteLine($"????????????????????????????????????????????????????????????");
-        Console.WriteLine($"?  {preview.Replace("\n", " ").Replace("\r", " ")}");
-        Console.WriteLine($"????????????????????????????????????????????????????????????");
+        Console.WriteLine($"=================================================================");
+        Console.WriteLine($"  Chunk {chunk.ChunkId + 1,2}/{chunk.TotalChunks} | Message: {chunk.MessageId[..Math.Min(20, chunk.MessageId.Length)]}...");
+        Console.WriteLine($"  Channel: {chunk.Channel,-10} | Priority: {chunk.Priority,-5} | Words: {chunk.WordCount}");
+        Console.WriteLine($"=================================================================");
+        Console.WriteLine(content);
+        Console.WriteLine($"=================================================================");
         Console.WriteLine();
         Console.Write("[a]llow | [b]lock | [q]uit > ");
 
         // Read user input
         var decision = await ReadUserDecisionAsync(ct);
-        
+
         if (decision == null)
         {
             Console.WriteLine("[PipeServer] Analysis cancelled, defaulting to ALLOW");
@@ -433,7 +432,7 @@ public class ChunkPipeServer : IDisposable
         }
 
         var decisionStr = decision == 'a' ? "ALLOW" : "BLOCK";
-        
+
         if (decisionStr == "ALLOW" && chunk.ChunkId == chunk.TotalChunks - 1)
         {
             // Last chunk allowed - show reconstructed text
