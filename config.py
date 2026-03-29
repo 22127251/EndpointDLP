@@ -19,6 +19,10 @@ class Config:
     mime_types: List[str] = field(default_factory=list)
     domain_blocklist: List[str] = field(default_factory=list)
     upload_url_keywords: List[str] = field(default_factory=lambda: list(_DEFAULT_UPLOAD_KEYWORDS))
+    
+    # Chunking configuration
+    chunk_size_words: int = 500
+    chunk_overlap_words: int = 50
 
     def resolved_temp_dir(self) -> str:
         return self.temp_dir if self.temp_dir else tempfile.gettempdir()
@@ -55,4 +59,6 @@ def load_config(path: str = "config.yaml") -> Config:
         mime_types=mime_types,
         domain_blocklist=domain_blocklist,
         upload_url_keywords=upload_url_keywords,
+        chunk_size_words=int(data.get("chunk_size_words", 500)),
+        chunk_overlap_words=int(data.get("chunk_overlap_words", 50)),
     )

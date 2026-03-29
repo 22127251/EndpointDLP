@@ -1,8 +1,8 @@
 pipe_name: "\\\\.\\pipe\\dlp_upload"
 timeout_seconds: 5
-fail_behavior: "block"        # "allow" or "block" on timeout/error
-temp_dir: "D:\\Code\\EndpointDLP\\tmp"  # empty string = use system %TEMP%
-min_upload_size_bytes: 1024   # ignore non-multipart bodies smaller than this
+fail_behavior: "block" # "allow" or "block" on timeout/error
+temp_dir: "C:\\Users\\Huy\\Documents\\EndpointDLP\\tmp" # empty string = use system %TEMP%
+min_upload_size_bytes: 1024 # ignore non-multipart bodies smaller than this
 
 # Domains to skip unconditionally (analytics, telemetry, logging)
 domain_blocklist:
