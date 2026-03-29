@@ -1,4 +1,3 @@
-using AgentCore;
 using ClipboardInterceptor;
 using Microsoft.Win32;
 
@@ -11,13 +10,13 @@ Registry.SetValue(ClipboardHistoryRegKey, ClipboardHistoryRegValue, 0, RegistryV
 Console.WriteLine("[DLP] Clipboard history disabled.");
 
 // --- Wire up components ---
-var agentCore = new StubAgentCore();
 using var monitor = new ClipboardMonitor();
-var service = new ClipboardInterceptorService(agentCore);
+var service = new ClipboardInterceptorService();
 monitor.ClipboardChanged += service.OnClipboardChanged;
 
 Console.WriteLine("[DLP] Clipboard DLP running. Press Ctrl+C to exit.");
-Console.WriteLine("[DLP] Copy any text to trigger analysis.\n");
+Console.WriteLine("[DLP] Copy any text to trigger analysis.");
+Console.WriteLine("[DLP] Chunks will be sent to QueueManager for analysis.\n");
 
 // --- Keep alive until Ctrl+C ---
 var cts = new CancellationTokenSource();
@@ -35,6 +34,8 @@ catch (OperationCanceledException) { }
 
 // --- Restore clipboard history ---
 Console.WriteLine("\n[DLP] Shutting down...");
+service.Dispose();
+
 if (previousValue is int prev)
     Registry.SetValue(ClipboardHistoryRegKey, ClipboardHistoryRegValue, prev, RegistryValueKind.DWord);
 else
