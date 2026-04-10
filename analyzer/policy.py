@@ -3,8 +3,7 @@ Policy dataclasses and YAML loader.
 
 Policy types:
   - RegexPolicy:    one or more regex patterns; optional context words
-  - DenylistPolicy: exact-match keyword list
-  - NerEntityPolicy: NER entity type(s) from the Stanza model
+  - DenylistPolicy: exact-match keyword list; optional context words
 """
 
 from __future__ import annotations
@@ -46,18 +45,7 @@ class DenylistPolicy:
     context: list[str] = field(default_factory=list)
 
 
-@dataclass
-class NerEntityPolicy:
-    id: str
-    name: str
-    channels: list[Channel]
-    action: Action
-    entity_types: list[str]  # e.g. ["PERSON", "ORGANIZATION"]
-    min_score: float = 0
-    language: str | None = None  # None = applies to both en and vi
-
-
-Policy = Union[RegexPolicy, DenylistPolicy, NerEntityPolicy]
+Policy = Union[RegexPolicy, DenylistPolicy]
 
 _ACTION_RANK: dict[str, int] = {
     "block": 3,
@@ -112,12 +100,10 @@ def load_policies(path: str) -> list[Policy]:
             ))
 
         elif policy_type == "ner_entity":
-            policies.append(NerEntityPolicy(
-                **common,
-                entity_types=raw.get("entity_types", []),
-                min_score=float(raw.get("min_score", 0.7)),
-                language=raw.get("language"),
-            ))
+            raise ValueError(
+                f"Policy id='{raw.get('id')}' uses type 'ner_entity' which is no longer supported. "
+                "Remove it from policies.yaml or change it to 'regex' or 'denylist'."
+            )
 
         else:
             raise ValueError(f"Unknown policy type '{policy_type}' for policy id='{raw.get('id')}'")

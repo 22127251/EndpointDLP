@@ -19,44 +19,6 @@ policies:
         score: 0.9
     context: ["credit card", "thẻ tín dụng", "card number", "số thẻ"]
 
-  # --- NER-based ---
-
-  - id: personal_names_vi
-    name: Personal Names (Vietnamese)
-    channels: [clipboard, browser, peripheral]
-    action: allow_log
-    type: ner_entity
-    entity_types: [PERSON]
-    language: vi
-    min_score: 0.7
-
-  - id: personal_names_en
-    name: Personal Names (English)
-    channels: [clipboard, browser, peripheral]
-    action: allow_log
-    type: ner_entity
-    entity_types: [PERSON]
-    language: en
-    min_score: 0.7
-
-  - id: organizations_vi
-    name: Organizations (Vietnamese)
-    channels: [browser, peripheral]
-    action: allow_log
-    type: ner_entity
-    entity_types: [ORGANIZATION]
-    language: vi
-    min_score: 0.7
-
-  - id: organizations_en
-    name: Organizations (English)
-    channels: [browser, peripheral]
-    action: allow_log
-    type: ner_entity
-    entity_types: [ORGANIZATION]
-    language: en
-    min_score: 0.7
-
   # --- Vietnamese PII ---
 
   - id: vn_cccd

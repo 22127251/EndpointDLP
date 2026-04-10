@@ -78,9 +78,8 @@ def run(config_path: str, policies_path: str) -> None:
                 win32file.WriteFile(handle, response_bytes)
 
                 log.info(
-                    "Responded chunk_id=%s lang=%s action=%s violations=%d",
+                    "Responded chunk_id=%s action=%s violations=%d",
                     result.chunk_id,
-                    result.detected_language,
                     result.applied_action,
                     len(result.violations),
                 )
