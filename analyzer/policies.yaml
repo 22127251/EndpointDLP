@@ -8,16 +8,19 @@ policies:
     action: block
     type: regex
     patterns:
-      - name: Visa
-        regex: "\\b4[0-9]{12}(?:[0-9]{3})?\\b"
-        score: 0.9
-      - name: Mastercard
-        regex: "\\b5[1-5][0-9]{14}\\b"
-        score: 0.9
-      - name: Amex
-        regex: "\\b3[47][0-9]{13}\\b"
-        score: 0.9
-    context: ["credit card", "thẻ tín dụng", "card number", "số thẻ"]
+      - "\\b4[0-9]{12}(?:[0-9]{3})?\\b"          # Visa
+      - "\\b5[1-5][0-9]{14}\\b"                   # Mastercard
+      - "\\b3[47][0-9]{13}\\b"                    # Amex
+    context_words:
+      - "credit card"
+      - "thẻ tín dụng"
+      - "card number"
+      - "số thẻ"
+      - "thẻ"
+      - "visa"
+      - "mastercard"
+      - "amex"
+    context_range: 120
 
   # --- Vietnamese PII ---
 
@@ -27,11 +30,17 @@ policies:
     action: block
     type: regex
     patterns:
-      - name: CCCD 12 digits
-        # Structure: province (0XX, codes 001-096) + gender/century (0-3) + birth year (2 digits) + sequence (6 digits)
-        regex: "\\b0[0-9]{2}[0-3][0-9]{2}[0-9]{6}\\b"
-        score: 0.6
-    context: ["CCCD", "căn cước", "căn cước công dân", "chứng minh nhân dân", "CMND", "số định danh", "định danh cá nhân"]
+      # CCCD 12 digits: province (0XX, 001-096) + gender/century digit (0-3) + birth year (2 digits) + sequence (6 digits)
+      - "\\b0[0-9]{2}[0-3][0-9]{8}\\b"
+    context_words:
+      - "CCCD"
+      - "căn cước"
+      - "căn cước công dân"
+      - "chứng minh nhân dân"
+      - "CMND"
+      - "số định danh"
+      - "định danh cá nhân"
+    context_range: 200
 
   - id: vn_bhxh
     name: Vietnamese Social / Health Insurance Number (BHXH / BHYT)
@@ -39,10 +48,16 @@ policies:
     action: block
     type: regex
     patterns:
-      - name: BHXH/BHYT 10 digits
-        regex: "\\b[0-9]{10}\\b"
-        score: 0.5
-    context: ["BHXH", "BHYT", "bảo hiểm xã hội", "bảo hiểm y tế", "mã số BHXH", "sổ BHXH", "mã BHYT"]
+      - "\\b[0-9]{10}\\b"
+    context_words:
+      - "BHXH"
+      - "BHYT"
+      - "bảo hiểm xã hội"
+      - "bảo hiểm y tế"
+      - "mã số BHXH"
+      - "sổ BHXH"
+      - "mã BHYT"
+    context_range: 100
 
   - id: vn_tax_code
     name: Vietnamese Tax Code (Mã số thuế)
@@ -50,14 +65,16 @@ policies:
     action: block
     type: regex
     patterns:
-      - name: Tax code 10 digits
-        regex: "\\b[0-9]{10}\\b"
-        score: 0.5
-      - name: Subsidiary tax code (13 digits)
-        # Format: XXXXXXXXXX-XXX
-        regex: "\\b[0-9]{10}-[0-9]{3}\\b"
-        score: 0.85
-    context: ["mã số thuế", "MST", "mã thuế", "tax code", "mã số doanh nghiệp", "tax identification"]
+      - "\\b[0-9]{10}\\b"                         # 10-digit individual/company code
+      - "\\b[0-9]{10}-[0-9]{3}\\b"                # 13-digit subsidiary code (XXXXXXXXXX-XXX)
+    context_words:
+      - "mã số thuế"
+      - "MST"
+      - "mã thuế"
+      - "tax code"
+      - "mã số doanh nghiệp"
+      - "tax identification"
+    context_range: 100
 
   # --- Keyword-based ---
 
@@ -66,7 +83,7 @@ policies:
     channels: [clipboard, browser, peripheral]
     action: block
     type: denylist
-    deny_list:
+    keywords:
       - "confidential"
       - "top secret"
       - "strictly confidential"
@@ -74,3 +91,5 @@ policies:
       - "bí mật"
       - "tuyệt mật"
       - "nội bộ"
+    context_words: []
+    context_range: 0

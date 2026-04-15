@@ -1,111 +1,46 @@
-"""
-Policy dataclasses and YAML loader.
-
-Policy types:
-  - RegexPolicy:    one or more regex patterns; optional context words
-  - DenylistPolicy: exact-match keyword list; optional context words
-"""
-
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
-from typing import Literal, Union
+from pathlib import Path
+from typing import Literal
 
 import yaml
 
-Action = Literal["block", "allow_log", "allow_no_log"]
-Channel = Literal["clipboard", "browser", "peripheral"]
+ActionType = Literal["block", "allow_log", "allow"]
+PolicyType = Literal["regex", "denylist"]
+
+ACTION_RANK: dict[str, int] = {"block": 2, "allow_log": 1, "allow": 0}
 
 
 @dataclass
-class RegexPattern:
-    name: str
-    regex: str
-    score: float = 0.8
-
-
-@dataclass
-class RegexPolicy:
+class Policy:
     id: str
     name: str
-    channels: list[Channel]
-    action: Action
-    patterns: list[RegexPattern]
-    context: list[str] = field(default_factory=list)
+    channels: list[str]
+    action: ActionType
+    type: PolicyType
+    patterns: list[str]      # non-empty when type == "regex"
+    keywords: list[str]      # non-empty when type == "denylist"
+    context_words: list[str]
+    context_range: int
 
 
-@dataclass
-class DenylistPolicy:
-    id: str
-    name: str
-    channels: list[Channel]
-    action: Action
-    deny_list: list[str]
-    context: list[str] = field(default_factory=list)
-
-
-Policy = Union[RegexPolicy, DenylistPolicy]
-
-_ACTION_RANK: dict[str, int] = {
-    "block": 3,
-    "allow_log": 2,
-    "allow_no_log": 1,
-}
-
-
-def strongest_action(actions: list[Action]) -> Action:
-    """Return the highest-priority action from a list."""
-    if not actions:
-        return "allow_no_log"
-    return max(actions, key=lambda a: _ACTION_RANK.get(a, 0))
-
-
-def load_policies(path: str) -> list[Policy]:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Policy file not found: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+def load_policies(yaml_path: str | Path) -> list[Policy]:
+    with open(yaml_path, encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
 
     policies: list[Policy] = []
-    for raw in data.get("policies", []):
-        policy_type = raw.get("type")
-        common = dict(
-            id=raw["id"],
-            name=raw["name"],
-            channels=raw.get("channels", []),
-            action=raw.get("action", "allow_log"),
-        )
-
-        if policy_type == "regex":
-            patterns = [
-                RegexPattern(
-                    name=p.get("name", ""),
-                    regex=p["regex"],
-                    score=float(p.get("score", 0.8)),
-                )
-                for p in raw.get("patterns", [])
-            ]
-            policies.append(RegexPolicy(
-                **common,
-                patterns=patterns,
-                context=raw.get("context", []),
-            ))
-
-        elif policy_type == "denylist":
-            policies.append(DenylistPolicy(
-                **common,
-                deny_list=raw.get("deny_list", []),
-                context=raw.get("context", []),
-            ))
-
-        elif policy_type == "ner_entity":
-            raise ValueError(
-                f"Policy id='{raw.get('id')}' uses type 'ner_entity' which is no longer supported. "
-                "Remove it from policies.yaml or change it to 'regex' or 'denylist'."
-            )
-
-        else:
-            raise ValueError(f"Unknown policy type '{policy_type}' for policy id='{raw.get('id')}'")
-
+    for entry in raw.get("policies", []):
+        policy_type: PolicyType = entry["type"]
+        policies.append(Policy(
+            id=entry["id"],
+            name=entry["name"],
+            channels=list(entry.get("channels", [])),
+            action=entry["action"],
+            type=policy_type,
+            patterns=list(entry.get("patterns", [])),
+            keywords=list(entry.get("keywords", [])),
+            context_words=list(entry.get("context_words", [])),
+            context_range=int(entry.get("context_range", 0)),
+        ))
     return policies

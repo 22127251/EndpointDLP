@@ -1,3 +1,32 @@
-presidio-analyzer>=2.2
-pywin32>=306
-pyyaml>=6.0
+# DLP Analyzer dependencies
+# Python 3.13 / Windows 11 x64
+
+google-re2       # RE2 regex engine (pre-built wheels available for Python 3.13 Windows)
+pyyaml           # YAML policy loader
+
+# Aho-Corasick (pyahocorasick requires compilation from source on Python 3.13 Windows)
+# Before running `pip install pyahocorasick`, follow these steps:
+#
+#   1. Install Visual C++ Build Tools:
+#      https://visualstudio.microsoft.com/visual-cpp-build-tools/
+#      Select workload: "Desktop development with C++"
+#      Minimum components: MSVC v143 compiler + Windows 11 SDK
+#
+#   2. Open "x64 Native Tools Command Prompt for VS 2022" from the Start menu.
+#
+#   3. Activate your venv:
+#      .venv\Scripts\activate
+#
+#   4. pip install pyahocorasick
+#      (pip will compile from source using MSVC automatically)
+#
+#   5. Verify: python -c "import ahocorasick; print('OK')"
+#
+pyahocorasick
+
+# File extraction
+python-docx      # .docx (MS Word)
+openpyxl         # .xlsx (MS Excel)
+python-pptx      # .pptx (MS PowerPoint)
+odfpy            # .odt / .ods / .odp (OpenDocument)
+PyMuPDF          # .pdf  (pre-built wheels for Python 3.13 Windows via Stable ABI)
