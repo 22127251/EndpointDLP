@@ -1,102 +1,61 @@
-# app/api/v1/agents.py
-from uuid import UUID
-from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
-from app.database import get_db
-from app.models.agent import Agent
-from app.models.user import User
-from app.schemas.agent import AgentRegister, AgentHeartbeat, AgentResponse
-from app.api.deps import get_current_user
-
-router = APIRouter(prefix="/agents", tags=["Agents"])
-
-
-@router.get("/", response_model=list[AgentResponse])
-async def list_agents(
-    status: str | None = None,
-    department: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Xem danh sách các máy đã cài Agent"""
-    query = select(Agent)
-    if status:
-        query = query.where(Agent.status == status)
-    if department:
-        query = query.where(Agent.department == department)
-    query = query.order_by(Agent.last_heartbeat.desc().nullslast())
-
-    result = await db.execute(query)
-    agents = result.scalars().all()
-    return [AgentResponse.model_validate(a) for a in agents]
-
-
-@router.post("/register", response_model=AgentResponse, status_code=201)
-async def register_agent(
-    agent_data: AgentRegister,
-    db: AsyncSession = Depends(get_db),
-):
-    """Agent tự đăng ký khi cài đặt lần đầu"""
-    agent = Agent(
-        **agent_data.model_dump(),
-        status="active",
-        last_heartbeat=datetime.now(timezone.utc)
-    )
-    db.add(agent)
-    await db.flush()
-    await db.refresh(agent)
-    return AgentResponse.model_validate(agent)
-
-
-@router.post("/heartbeat")
-async def agent_heartbeat(
-    heartbeat: AgentHeartbeat,
-    db: AsyncSession = Depends(get_db),
-):
-    """Agent gửi heartbeat định kỳ (mỗi 1-5 phút)"""
-    result = await db.execute(select(Agent).where(Agent.id == heartbeat.agent_id))
-    agent = result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent chưa đăng ký")
-
-    agent.status = "active"
-    agent.last_heartbeat = datetime.now(timezone.utc)
-    if heartbeat.ip_address:
-        agent.ip_address = heartbeat.ip_address
-    if heartbeat.agent_version:
-        agent.agent_version = heartbeat.agent_version
-
-    await db.flush()
-    return {"status": "ok"}
-
+# app/api/v1/agents.py - Cập nhật endpoint lấy policies cho Agent
 
 @router.get("/policies")
 async def get_policies_for_agent(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """Agent lấy danh sách chính sách đang active để áp dụng"""
+    """
+    Agent lấy danh sách policies áp dụng cho mình.
+    Logic: Agent → AgentGroups → PolicyAssignments → PolicyGroups → Policies
+    """
+    from app.models.agent_group import AgentGroupMember
+    from app.models.policy_group import PolicyAssignment, PolicyGroupMember
     from app.models.policy import Policy
     from app.schemas.policy import PolicyResponse
 
-    # Kiểm tra agent tồn tại
-    agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
-    agent = agent_result.scalar_one_or_none()
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent không tồn tại")
+    # Bước 1: Tìm tất cả groups mà agent thuộc về
+    agent_groups_result = await db.execute(
+        select(AgentGroupMember.agent_group_id)
+        .where(AgentGroupMember.agent_id == agent_id)
+    )
+    agent_group_ids = [row[0] for row in agent_groups_result.all()]
 
-    # Lấy chính sách active, lọc theo department
-    query = select(Policy).where(Policy.is_active == True)
-    result = await db.execute(query)
-    all_policies = result.scalars().all()
+    if not agent_group_ids:
+        return {"policies": [], "message": "Agent chưa thuộc group nào"}
 
-    # Lọc theo department của agent
-    applicable = []
-    for p in all_policies:
-        depts = p.target_departments or ["all"]
-        if "all" in depts or (agent.department and agent.department in depts):
-            applicable.append(PolicyResponse.model_validate(p))
+    # Bước 2: Tìm tất cả PolicyGroup được gán cho các AgentGroup này
+    assignments_result = await db.execute(
+        select(PolicyAssignment.policy_group_id)
+        .where(
+            PolicyAssignment.agent_group_id.in_(agent_group_ids),
+            PolicyAssignment.is_active == True
+        )
+    )
+    policy_group_ids = [row[0] for row in assignments_result.all()]
 
-    return {"policies": applicable}
+    if not policy_group_ids:
+        return {"policies": [], "message": "Chưa có policy group nào được gán"}
+
+    # Bước 3: Lấy tất cả Policies từ các PolicyGroup
+    policy_ids_result = await db.execute(
+        select(PolicyGroupMember.policy_id, PolicyGroupMember.execution_order)
+        .where(PolicyGroupMember.policy_group_id.in_(policy_group_ids))
+        .order_by(PolicyGroupMember.execution_order)
+    )
+    policy_ids = list(set([row[0] for row in policy_ids_result.all()]))
+
+    if not policy_ids:
+        return {"policies": []}
+
+    # Bước 4: Lấy chi tiết policies (chỉ lấy active)
+    policies_result = await db.execute(
+        select(Policy)
+        .where(Policy.id.in_(policy_ids), Policy.is_active == True)
+    )
+    policies = policies_result.scalars().all()
+
+    return {
+        "policies": [PolicyResponse.model_validate(p) for p in policies],
+        "total": len(policies)
+    }
