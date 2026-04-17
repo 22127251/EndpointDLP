@@ -6,11 +6,13 @@ Usage
   # Analyze a plain-text string:
   python test_cli.py --text "4111111111111111 credit card" --channel clipboard
 
-  # Analyze a file:
+  # Analyze a file (auto-detects tabular vs plain-text):
   python test_cli.py --file path/to/file.docx --channel peripheral
+  python test_cli.py --file path/to/data.csv --channel browser
+  python test_cli.py --file path/to/report.pdf --channel peripheral
 
-  # Show timing information:
-  python test_cli.py --text "nội bộ" --debug
+  # Show timing and extraction details:
+  python test_cli.py --file data.xlsx --debug
 """
 
 from __future__ import annotations
@@ -23,8 +25,8 @@ from pathlib import Path
 _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))
 
-from engine import DLPEngine
-from extractor import extract_text
+from engine import AnalysisResult, DLPEngine, Match
+from extractor import extract_tabular, extract_text, is_tabular
 
 _POLICY_FILE = _HERE / "policies.yaml"
 
@@ -41,7 +43,28 @@ def _colorize(action: str) -> str:
     return f"{color}{action.upper()}{_RESET}"
 
 
-def _print_result(result, text: str, debug: bool) -> None:
+def _format_match(m: Match, plain_text: str | None) -> str:
+    """Return a single formatted line describing one match."""
+    if m.column_name is not None:
+        # Tabular match — show location by sheet/column/row
+        parts: list[str] = []
+        if m.sheet:
+            parts.append(f"Sheet: {m.sheet}")
+        parts.append(f"Col: {m.column_name}" if m.column_name else "Col: (body)")
+        if m.row is not None:
+            parts.append(f"Row: {m.row}")
+        location = " | ".join(parts)
+        return f"    [{location}] → {repr(m.text)}"
+    else:
+        # Plain-text match — show character span and snippet
+        snippet = ""
+        if plain_text is not None and m.start is not None and m.end is not None:
+            s = max(0, m.start - 20)
+            snippet = f"  …{plain_text[s:m.end + 20].replace(chr(10), ' ')}…"
+        return f"    [{m.start}:{m.end}]{snippet}\n           matched: {repr(m.text)}"
+
+
+def _print_result(result: AnalysisResult, plain_text: str | None, debug: bool) -> None:
     print(f"\nApplied action: {_colorize(result.applied_action)}")
     if debug:
         print(f"Elapsed       : {result.elapsed_ms:.2f} ms")
@@ -55,9 +78,7 @@ def _print_result(result, text: str, debug: bool) -> None:
         print(f"\n  [{_colorize(v.action)}] {v.policy_name} ({v.policy_id})")
         print(f"  Matches: {len(v.matches)}")
         for m in v.matches:
-            snippet = text[max(0, m.start - 20):m.end + 20].replace("\n", " ")
-            print(f"    [{m.start}:{m.end}] …{snippet}…")
-            print(f"           matched: {repr(m.text)}")
+            print(_format_match(m, plain_text))
 
 
 def main() -> None:
@@ -89,30 +110,42 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Load engine
     engine = DLPEngine(args.policy)
 
-    # Get text
+    plain_text: str | None = None
+    source_label: str
+
     if args.text is not None:
-        text = args.text
+        plain_text = args.text
         source_label = "<inline text>"
+        result = engine.analyze(plain_text, args.channel)
+
     else:
         file_path = Path(args.file)
         if not file_path.exists():
             print(f"Error: file not found: {file_path}", file=sys.stderr)
             sys.exit(1)
-        if args.debug:
-            print(f"Extracting text from: {file_path}")
-        text = extract_text(file_path)
         source_label = str(file_path)
-        if args.debug:
-            print(f"Extracted {len(text)} characters")
+
+        if is_tabular(file_path):
+            if args.debug:
+                print(f"Mode   : tabular extraction ({file_path.suffix})")
+            tabular = extract_tabular(file_path)
+            if args.debug:
+                print(f"Columns: {len(tabular.columns)}")
+            result = engine.analyze_tabular(tabular, args.channel)
+        else:
+            if args.debug:
+                print(f"Mode   : plain-text extraction ({file_path.suffix})")
+            plain_text = extract_text(file_path)
+            if args.debug:
+                print(f"Extracted {len(plain_text)} characters")
+            result = engine.analyze(plain_text, args.channel)
 
     print(f"Source : {source_label}")
     print(f"Channel: {args.channel}")
 
-    result = engine.analyze(text, args.channel)
-    _print_result(result, text, args.debug)
+    _print_result(result, plain_text, args.debug)
 
 
 if __name__ == "__main__":

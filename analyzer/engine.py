@@ -1,30 +1,18 @@
 """
 DLP analysis engine: RE2 regex + Aho-Corasick denylist/context matching.
 
-Flow
-----
-Init:
-  1. Load policies from YAML.
-  2. Compile each regex policy's patterns into one RE2 pattern (union of all patterns).
-  3. Build a single Aho-Corasick automaton over:
-       - context_words  (tagged as "context")
-       - denylist keywords (tagged as "denylist")
-     Each automaton value is a list of (policy_id, tag) pairs so multiple
-     policies can share the same word.
+Two analysis modes
+------------------
+Plain-text  (analyze):
+  RE2 + AC on the full text. Context words confirmed by character proximity
+  (AC hit within ±context_range chars of the regex/denylist match).
+  Match carries start/end character positions.
 
-Analyze(text, channel):
-  1. RE2 phase  - run compiled patterns that include this channel.
-  2. AC phase   - run the automaton once over the full text (if non-empty).
-  3. For each RE2 hit:
-       - policy has context_words → binary-search AC results for a matching
-         context hit within [hit.start - range, hit.end + range].
-       - policy has no context_words → unconditional true match.
-  4. For each denylist policy:
-       - collect AC hits tagged "denylist" for that policy.
-       - policy has context_words → binary-search for a context hit in window.
-       - policy has no context_words → all keyword hits are true matches.
-  5. Determine applied_action = strongest action across all violations.
-     All violations (block AND allow_log) are always returned.
+Tabular      (analyze_tabular):
+  RE2 scanned per-cell (avoids cross-cell false positives).
+  AC scanned on the joined column text for denylist keywords.
+  Context words confirmed by column-header matching (not character proximity).
+  Match carries column_name, 1-based row, and sheet name.
 """
 
 from __future__ import annotations
@@ -33,12 +21,15 @@ import bisect
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import ahocorasick
 import re2
 
 from policy import ACTION_RANK, Policy, load_policies
+
+if TYPE_CHECKING:
+    from extractor import TabularData
 
 
 # ---------------------------------------------------------------------------
@@ -47,9 +38,14 @@ from policy import ACTION_RANK, Policy, load_policies
 
 @dataclass
 class Match:
-    start: int
-    end: int
     text: str
+    # Plain-text fields (None for tabular matches)
+    start: int | None = None
+    end: int | None = None
+    # Tabular fields (None for plain-text matches)
+    column_name: str | None = None
+    row: int | None = None      # 1-based data row (header row not counted)
+    sheet: str | None = None    # None for single-sheet formats (CSV)
 
 
 @dataclass
@@ -94,6 +90,7 @@ class DLPEngine:
         self._compiled: list[_CompiledPolicy] = []
         self._automaton: ahocorasick.Automaton | None = None
         self._trie_empty = True
+        self._policy_lookup: dict[str, Policy] = {p.id: p for p in self._policies}
 
         self._build_regex()
         self._build_automaton()
@@ -106,14 +103,11 @@ class DLPEngine:
         for policy in self._policies:
             if policy.type != "regex" or not policy.patterns:
                 continue
-            # Join all patterns as alternatives; wrap each in a non-capturing group.
             combined = "|".join(f"(?:{p})" for p in policy.patterns)
             compiled = re2.compile(combined)
             self._compiled.append(_CompiledPolicy(compiled, policy))
 
     def _build_automaton(self) -> None:
-        # Collect all strings that need to go into the trie.
-        # word → list of (policy_id, tag)
         word_map: dict[str, list[tuple[str, str]]] = {}
 
         for policy in self._policies:
@@ -140,15 +134,138 @@ class DLPEngine:
         self._trie_empty = False
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API — plain text
     # ------------------------------------------------------------------
 
     def analyze(self, text: str, channel: str) -> AnalysisResult:
+        """Analyze plain text. Matches include start/end character positions."""
         t0 = time.perf_counter()
 
+        re2_hits, ac_hits, ac_starts = self._scan_text(text, channel)
+
+        violations_map: dict[str, list[Match]] = {}
+
+        # --- Resolve RE2 hits ---
+        for start, end, policy in re2_hits:
+            matched_text = text[start:end]
+            if not policy.context_words:
+                violations_map.setdefault(policy.id, []).append(
+                    Match(text=matched_text, start=start, end=end)
+                )
+            elif self._has_context_proximity(policy, start, end, ac_hits, ac_starts):
+                violations_map.setdefault(policy.id, []).append(
+                    Match(text=matched_text, start=start, end=end)
+                )
+
+        # --- Resolve denylist hits ---
+        for policy in self._policies:
+            if policy.type != "denylist" or channel not in policy.channels:
+                continue
+            for hit in ac_hits:
+                if hit.tag != "denylist" or hit.policy_id != policy.id:
+                    continue
+                matched_text = text[hit.start:hit.end]
+                if not policy.context_words:
+                    violations_map.setdefault(policy.id, []).append(
+                        Match(text=matched_text, start=hit.start, end=hit.end)
+                    )
+                elif self._has_context_proximity(policy, hit.start, hit.end, ac_hits, ac_starts):
+                    violations_map.setdefault(policy.id, []).append(
+                        Match(text=matched_text, start=hit.start, end=hit.end)
+                    )
+
+        violations = self._build_violations(violations_map, deduplicate=True)
+        applied_action = _strongest_action(violations)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return AnalysisResult(applied_action=applied_action, violations=violations, elapsed_ms=elapsed_ms)
+
+    # ------------------------------------------------------------------
+    # Public API — tabular
+    # ------------------------------------------------------------------
+
+    def analyze_tabular(self, tabular: TabularData, channel: str) -> AnalysisResult:
+        """
+        Analyze column-structured tabular data.
+        Context is determined by column-header matching, not character proximity.
+        Matches include column_name, 1-based row, and sheet name.
+        """
+        t0 = time.perf_counter()
+        violations_map: dict[str, list[Match]] = {}
+
+        for col in tabular.columns:
+            col_text = "\n".join(col.values)
+            col_text_lower = col_text.lower()
+
+            # --- RE2 phase: scan per-cell to avoid cross-cell false positives ---
+            for cp in self._compiled:
+                if channel not in cp.policy.channels:
+                    continue
+                policy = cp.policy
+
+                # Column-header context check
+                if policy.context_words and not self._header_matches_context(col.header, policy):
+                    continue
+
+                for row_idx, cell_value in enumerate(col.values):
+                    if not cell_value:
+                        continue
+                    for m in cp.pattern.finditer(cell_value):
+                        violations_map.setdefault(policy.id, []).append(Match(
+                            text=cell_value[m.start():m.end()],
+                            column_name=col.header,
+                            row=row_idx + 1,
+                            sheet=col.sheet,
+                        ))
+
+            # --- AC phase: denylist keywords on joined column text ---
+            if not self._trie_empty and self._automaton is not None:
+                for end_idx, (word, entries) in self._automaton.iter(col_text_lower):
+                    start_idx = end_idx - len(word) + 1
+                    end_exc = end_idx + 1
+                    for policy_id, tag in entries:
+                        if tag != "denylist":
+                            continue
+                        policy = self._policy_lookup.get(policy_id)
+                        if policy is None or channel not in policy.channels:
+                            continue
+                        # Column-header context check
+                        if policy.context_words and not self._header_matches_context(col.header, policy):
+                            continue
+                        row = col_text[:start_idx].count("\n") + 1
+                        matched_text = col_text[start_idx:end_exc]
+                        violations_map.setdefault(policy_id, []).append(Match(
+                            text=matched_text,
+                            column_name=col.header,
+                            row=row,
+                            sheet=col.sheet,
+                        ))
+
+        violations = self._build_violations(violations_map, deduplicate=False)
+        # Deduplicate tabular matches by (column_name, row, sheet, text) identity
+        for v in violations:
+            seen: set[tuple] = set()
+            deduped: list[Match] = []
+            for m in v.matches:
+                key = (m.column_name, m.row, m.sheet, m.text)
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(m)
+            v.matches = deduped
+
+        applied_action = _strongest_action(violations)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return AnalysisResult(applied_action=applied_action, violations=violations, elapsed_ms=elapsed_ms)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _scan_text(
+        self, text: str, channel: str
+    ) -> tuple[list[tuple[int, int, Policy]], list[_ACHit], list[int]]:
+        """Run RE2 and AC scanning. Returns raw hits (no context resolution)."""
         text_lower = text.lower()
 
-        # --- RE2 phase ---
         re2_hits: list[tuple[int, int, Policy]] = []
         for cp in self._compiled:
             if channel not in cp.policy.channels:
@@ -156,106 +273,46 @@ class DLPEngine:
             for m in cp.pattern.finditer(text):
                 re2_hits.append((m.start(), m.end(), cp.policy))
 
-        # --- Aho-Corasick phase ---
         ac_hits: list[_ACHit] = []
         if not self._trie_empty and self._automaton is not None:
             for end_idx, (word, entries) in self._automaton.iter(text_lower):
                 start_idx = end_idx - len(word) + 1
-                end_exc = end_idx + 1  # convert to exclusive
+                end_exc = end_idx + 1
                 for policy_id, tag in entries:
                     ac_hits.append(_ACHit(start_idx, end_exc, policy_id, tag))
-            # Sort by start position for binary search.
             ac_hits.sort(key=lambda h: h.start)
 
-        ac_starts = [h.start for h in ac_hits]  # parallel list for bisect
+        ac_starts = [h.start for h in ac_hits]
+        return re2_hits, ac_hits, ac_starts
 
-        # --- Resolve RE2 hits ---
-        # policy_id → list of Match
-        violations_map: dict[str, list[Match]] = {}
-
-        for start, end, policy in re2_hits:
-            if channel not in policy.channels:
-                continue
-            matched_text = text[start:end]
-
-            if not policy.context_words:
-                # No context required – unconditional match.
-                violations_map.setdefault(policy.id, []).append(
-                    Match(start, end, matched_text)
-                )
-            else:
-                if self._has_context(policy, start, end, ac_hits, ac_starts):
-                    violations_map.setdefault(policy.id, []).append(
-                        Match(start, end, matched_text)
-                    )
-
-        # --- Resolve denylist hits ---
-        for policy in self._policies:
-            if policy.type != "denylist":
-                continue
-            if channel not in policy.channels:
-                continue
-
-            denylist_hits = [
-                h for h in ac_hits
-                if h.tag == "denylist" and h.policy_id == policy.id
-            ]
-
-            for hit in denylist_hits:
-                matched_text = text[hit.start:hit.end]
-                if not policy.context_words:
-                    violations_map.setdefault(policy.id, []).append(
-                        Match(hit.start, hit.end, matched_text)
-                    )
-                else:
-                    if self._has_context(policy, hit.start, hit.end, ac_hits, ac_starts):
-                        violations_map.setdefault(policy.id, []).append(
-                            Match(hit.start, hit.end, matched_text)
-                        )
-
-        # --- Deduplicate overlapping matches per policy ---
-        policy_lookup = {p.id: p for p in self._policies}
+    def _build_violations(
+        self, violations_map: dict[str, list[Match]], deduplicate: bool
+    ) -> list[Violation]:
         violations: list[Violation] = []
         for policy_id, matches in violations_map.items():
-            deduped = _deduplicate(matches)
-            policy = policy_lookup[policy_id]
+            policy = self._policy_lookup[policy_id]
+            if deduplicate:
+                matches = _deduplicate_plain(matches)
             violations.append(Violation(
                 policy_id=policy_id,
                 policy_name=policy.name,
                 action=policy.action,
-                matches=deduped,
+                matches=matches,
             ))
-
-        # --- Applied action ---
-        applied_action = "allow"
-        for v in violations:
-            if ACTION_RANK.get(v.action, 0) > ACTION_RANK.get(applied_action, 0):
-                applied_action = v.action
-
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        return AnalysisResult(
-            applied_action=applied_action,
-            violations=violations,
-            elapsed_ms=elapsed_ms,
-        )
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
+        return violations
 
     @staticmethod
-    def _has_context(
+    def _has_context_proximity(
         policy: Policy,
         hit_start: int,
         hit_end: int,
         ac_hits: list[_ACHit],
         ac_starts: list[int],
     ) -> bool:
-        """Return True if any context word for *policy* falls within the window."""
+        """Return True if a context word for *policy* falls within the character window."""
         window_start = max(0, hit_start - policy.context_range)
         window_end = hit_end + policy.context_range
 
-        # Binary search to the first hit that could be in the window.
         lo = bisect.bisect_left(ac_starts, window_start)
         for i in range(lo, len(ac_hits)):
             h = ac_hits[i]
@@ -265,17 +322,34 @@ class DLPEngine:
                 return True
         return False
 
+    @staticmethod
+    def _header_matches_context(header: str, policy: Policy) -> bool:
+        """Return True if the column header matches any context word (substring, case-insensitive)."""
+        h = header.lower()
+        return any(cw.lower() in h or h in cw.lower() for cw in policy.context_words)
 
-def _deduplicate(matches: list[Match]) -> list[Match]:
-    """Remove matches that are fully contained within another match."""
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _strongest_action(violations: list[Violation]) -> str:
+    action = "allow"
+    for v in violations:
+        if ACTION_RANK.get(v.action, 0) > ACTION_RANK.get(action, 0):
+            action = v.action
+    return action
+
+
+def _deduplicate_plain(matches: list[Match]) -> list[Match]:
+    """Remove plain-text matches fully contained within another (by character span)."""
     if not matches:
         return matches
-    # Sort by start, then by length descending.
-    sorted_m = sorted(matches, key=lambda m: (m.start, -(m.end - m.start)))
+    sorted_m = sorted(matches, key=lambda m: (m.start, -(m.end - m.start)))  # type: ignore[operator]
     result: list[Match] = []
     last_end = -1
     for m in sorted_m:
-        if m.start >= last_end:
-            result.append(m) 
-            last_end = m.end
+        if m.start >= last_end:  # type: ignore[operator]
+            result.append(m)
+            last_end = m.end  # type: ignore[assignment]
     return result

@@ -1,16 +1,13 @@
 policies:
 
-  # --- Generic PII ---
-
-  - id: cc_numbers
-    name: Credit Card Numbers
-    channels: [clipboard, browser, peripheral]
+  # --- Chặn đưa thẻ VISA vào Browser ---
+  - id: block_visa_browser
+    name: Block Visa Card in Browser
+    channels: [browser]
     action: block
     type: regex
     patterns:
-      - "\\b4[0-9]{12}(?:[0-9]{3})?\\b"          # Visa
-      - "\\b5[1-5][0-9]{14}\\b"                   # Mastercard
-      - "\\b3[47][0-9]{13}\\b"                    # Amex
+      - "\\b4[0-9]{12}(?:[0-9]{3})?\\b"          # Định dạng thẻ Visa
     context_words:
       - "credit card"
       - "thẻ tín dụng"
@@ -18,19 +15,16 @@ policies:
       - "số thẻ"
       - "thẻ"
       - "visa"
-      - "mastercard"
-      - "amex"
     context_range: 120
 
-  # --- Vietnamese PII ---
-
-  - id: vn_cccd
-    name: Vietnamese Citizen ID (CCCD / CMND)
-    channels: [clipboard, browser, peripheral]
+  # --- Chặn đưa CCCD vào Browser ---
+  - id: block_cccd_browser
+    name: Block Vietnamese Citizen ID (CCCD) in Browser
+    channels: [browser]
     action: block
     type: regex
     patterns:
-      # CCCD 12 digits: province (0XX, 001-096) + gender/century digit (0-3) + birth year (2 digits) + sequence (6 digits)
+      # CCCD 12 số: mã tỉnh/thành + thế kỷ/giới tính + năm sinh + số ngẫu nhiên
       - "\\b0[0-9]{2}[0-3][0-9]{8}\\b"
     context_words:
       - "CCCD"
@@ -42,54 +36,38 @@ policies:
       - "định danh cá nhân"
     context_range: 200
 
-  - id: vn_bhxh
-    name: Vietnamese Social / Health Insurance Number (BHXH / BHYT)
-    channels: [clipboard, browser, peripheral]
-    action: block
-    type: regex
-    patterns:
-      - "\\b[0-9]{10}\\b"
-    context_words:
-      - "BHXH"
-      - "BHYT"
-      - "bảo hiểm xã hội"
-      - "bảo hiểm y tế"
-      - "mã số BHXH"
-      - "sổ BHXH"
-      - "mã BHYT"
-    context_range: 100
-
-  - id: vn_tax_code
-    name: Vietnamese Tax Code (Mã số thuế)
-    channels: [clipboard, browser, peripheral]
-    action: block
-    type: regex
-    patterns:
-      - "\\b[0-9]{10}\\b"                         # 10-digit individual/company code
-      - "\\b[0-9]{10}-[0-9]{3}\\b"                # 13-digit subsidiary code (XXXXXXXXXX-XXX)
-    context_words:
-      - "mã số thuế"
-      - "MST"
-      - "mã thuế"
-      - "tax code"
-      - "mã số doanh nghiệp"
-      - "tax identification"
-    context_range: 100
-
-  # --- Keyword-based ---
-
-  - id: confidential_keywords
-    name: Confidential Keywords
-    channels: [clipboard, browser, peripheral]
+  # --- Chặn từ khóa liên quan đến Bí mật / Nội bộ vào Browser ---
+  - id: block_confidential_keywords_browser
+    name: Block Confidential Keywords in Browser
+    channels: [browser]
     action: block
     type: denylist
     keywords:
-      - "confidential"
-      - "top secret"
-      - "strictly confidential"
       - "mật"
       - "bí mật"
       - "tuyệt mật"
       - "nội bộ"
+      - "confidential"
+      - "top secret"
+      - "strictly confidential"
     context_words: []
     context_range: 0
+
+  # --- Cho phép và Ghi Log (Allow & Log) Số điện thoại vào Browser ---
+  - id: log_phone_numbers_browser
+    name: Log Phone Numbers in Browser
+    channels: [browser]
+    action: allow_with_log  # Hoặc 'log' / 'audit' tùy thuộc vào engine DLP thực tế của bạn
+    type: regex
+    patterns:
+      # Định dạng số điện thoại Việt Nam (10 số, bắt đầu bằng 03, 05, 07, 08, 09 hoặc +84)
+      - "\\b0[35789][0-9]{8}\\b"
+      - "\\+84[35789][0-9]{8}\\b"
+    context_words:
+      - "số điện thoại"
+      - "sđt"
+      - "phone"
+      - "tel"
+      - "liên hệ"
+      - "hotline"
+    context_range: 100
