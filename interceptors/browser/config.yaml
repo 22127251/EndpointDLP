@@ -1,4 +1,4 @@
-pipe_name: "\\\\.\\pipe\\dlp_upload"
+pipe_name: "\\\\.\\pipe\\dlp_agent"
 timeout_seconds: 5
 fail_behavior: "block"        # "allow" or "block" on timeout/error
 temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp"  # empty string = use system %TEMP%

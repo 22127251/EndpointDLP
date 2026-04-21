@@ -141,14 +141,15 @@ def request(flow: http.HTTPFlow) -> None:
         return
 
     payload = {
-        "temp_path": temp_path,
-        "url": flow.request.pretty_url,
-        "method": flow.request.method,
-        "content_type": content_type,
-        "effective_mime": file_mime,
-        "filename": filename,
-        "size_bytes": len(file_body),
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "channel": "browser",
+        "kind": "file",
+        "file_path": temp_path,
+        "metadata": {
+            "url": flow.request.pretty_url,
+            "filename": filename,
+            "size_bytes": len(file_body),
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        },
     }
 
     decision, consumer_received = _consult_policy(payload)

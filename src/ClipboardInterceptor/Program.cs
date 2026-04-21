@@ -11,7 +11,7 @@ Registry.SetValue(ClipboardHistoryRegKey, ClipboardHistoryRegValue, 0, RegistryV
 Console.WriteLine("[DLP] Clipboard history disabled.");
 
 // --- Wire up components ---
-var agentCore = new StubAgentCore();
+var agentCore = new PipeAgentCore();
 using var monitor = new ClipboardMonitor();
 var service = new ClipboardInterceptorService(agentCore);
 monitor.ClipboardChanged += service.OnClipboardChanged;
