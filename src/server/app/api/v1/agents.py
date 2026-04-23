@@ -1,61 +1,110 @@
-# app/api/v1/agents.py - Cập nhật endpoint lấy policies cho Agent
+from uuid import UUID
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from app.database import get_db
+from app.models.agent import Agent, AgentStatus
+from app.models.user import User
+from app.schemas.agent import AgentResponse
+from app.api.deps import get_current_user
 
-@router.get("/policies")
-async def get_policies_for_agent(
+router = APIRouter(prefix="/agents", tags=["Agents"])
+
+
+@router.get("/", response_model=list[AgentResponse])
+async def list_agents(
+    status: AgentStatus | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = select(Agent)
+    if status:
+        query = query.where(Agent.status == status)
+    
+    query = query.order_by(Agent.updated_at.desc().nullslast())
+
+    result = await db.execute(query)
+    agents = result.scalars().all()
+    return [AgentResponse.model_validate(a) for a in agents]
+
+
+@router.post("/register", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+async def register_agent(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    agent = Agent(
+        status=AgentStatus.ACTIVE,
+        last_seen=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc)
+    )
+    db.add(agent)
+    await db.flush()
+    await db.refresh(agent)
+    return AgentResponse.model_validate(agent)
+
+
+@router.post("/{agent_id}/heartbeat")
+async def agent_heartbeat(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Agent lấy danh sách policies áp dụng cho mình.
-    Logic: Agent → AgentGroups → PolicyAssignments → PolicyGroups → Policies
-    """
-    from app.models.agent_group import AgentGroupMember
-    from app.models.policy_group import PolicyAssignment, PolicyGroupMember
-    from app.models.policy import Policy
-    from app.schemas.policy import PolicyResponse
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    # Bước 1: Tìm tất cả groups mà agent thuộc về
-    agent_groups_result = await db.execute(
-        select(AgentGroupMember.agent_group_id)
-        .where(AgentGroupMember.agent_id == agent_id)
-    )
-    agent_group_ids = [row[0] for row in agent_groups_result.all()]
+    agent.status = AgentStatus.ACTIVE
+    agent.updated_at = datetime.now(timezone.utc)
+    agent.last_seen = datetime.now(timezone.utc)
 
-    if not agent_group_ids:
-        return {"policies": [], "message": "Agent chưa thuộc group nào"}
 
-    # Bước 2: Tìm tất cả PolicyGroup được gán cho các AgentGroup này
-    assignments_result = await db.execute(
-        select(PolicyAssignment.policy_group_id)
-        .where(
-            PolicyAssignment.agent_group_id.in_(agent_group_ids),
-            PolicyAssignment.is_active == True
-        )
-    )
-    policy_group_ids = [row[0] for row in assignments_result.all()]
+    await db.flush()
+    return {"status": "ok"}
 
-    if not policy_group_ids:
-        return {"policies": [], "message": "Chưa có policy group nào được gán"}
+@router.post("/{agent_id}/deactivate")
+async def deactivate_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    # Bước 3: Lấy tất cả Policies từ các PolicyGroup
-    policy_ids_result = await db.execute(
-        select(PolicyGroupMember.policy_id, PolicyGroupMember.execution_order)
-        .where(PolicyGroupMember.policy_group_id.in_(policy_group_ids))
-        .order_by(PolicyGroupMember.execution_order)
-    )
-    policy_ids = list(set([row[0] for row in policy_ids_result.all()]))
+    agent.status = AgentStatus.INACTIVE
+    agent.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {"status": "ok"}
 
-    if not policy_ids:
-        return {"policies": []}
+@router.post("/{agent_id}/reactivate")
+async def reactivate_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    # Bước 4: Lấy chi tiết policies (chỉ lấy active)
-    policies_result = await db.execute(
-        select(Policy)
-        .where(Policy.id.in_(policy_ids), Policy.is_active == True)
-    )
-    policies = policies_result.scalars().all()
+    agent.status = AgentStatus.ACTIVE
+    agent.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    return {"status": "ok"}
 
-    return {
-        "policies": [PolicyResponse.model_validate(p) for p in policies],
-        "total": len(policies)
-    }
+@router.delete("/{agent_id}")
+async def delete_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    await db.delete(agent)
