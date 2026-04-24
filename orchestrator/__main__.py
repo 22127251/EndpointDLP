@@ -9,6 +9,7 @@ sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(_repo_root / "analyzer"))  # engine.py uses bare 'from policy import'
 
 from orchestrator.config import load_config
+from orchestrator.dispatcher import Dispatcher
 from orchestrator.logging_setup import configure_logging
 from orchestrator.policy_manager import PolicyManager
 from orchestrator.server import PipeServer
@@ -26,7 +27,7 @@ def main() -> None:
     if args.foreground:
         _run_foreground()
     else:
-        print("Not implemented in Phase 1.")
+        print("Not implemented yet.")
         sys.exit(1)
 
 
@@ -37,7 +38,8 @@ def _run_foreground() -> None:
 
     config = load_config()
     pm = PolicyManager(config)
-    server = PipeServer(config, pm)
+    dispatcher = Dispatcher(config, pm)
+    server = PipeServer(config, dispatcher)
 
     # Run the blocking pipe server on a daemon thread so that Ctrl+C (KeyboardInterrupt)
     # can interrupt the main thread's join() — signal handlers can't fire while a
@@ -52,8 +54,10 @@ def _run_foreground() -> None:
         log.info("Ctrl+C received, shutting down...")
         server.stop()
         t.join(timeout=5.0)
-
-    log.info("Orchestrator stopped cleanly.")
+    finally:
+        dispatcher.shutdown(wait=True)
+        pm.stop()
+        log.info("Orchestrator stopped cleanly.")
 
 
 if __name__ == "__main__":

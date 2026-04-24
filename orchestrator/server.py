@@ -2,80 +2,53 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 
 import pywintypes
 import win32file
 import win32pipe
 
 from orchestrator.config import OrchestratorConfig
-from orchestrator.policy_manager import PolicyManager
+from orchestrator.dispatcher import Dispatcher
 
 log = logging.getLogger(__name__)
 
 _BUFFER = 65536
+# ERROR_PIPE_CONNECTED: client connected between CreateNamedPipe and ConnectNamedPipe.
+# This is a success condition — the pipe is already connected.
+_ERROR_PIPE_CONNECTED = 535
 
 
 class PipeServer:
-    def __init__(self, config: OrchestratorConfig, policy_manager: PolicyManager) -> None:
+    def __init__(self, config: OrchestratorConfig, dispatcher: Dispatcher) -> None:
         self._config = config
-        self._policy_manager = policy_manager
-        self._running = False
-        self._pipe = None
+        self._dispatcher = dispatcher
+        self._stop = threading.Event()
 
     def run(self) -> None:
-        self._pipe = win32pipe.CreateNamedPipe(
+        log.info(
+            "Pipe server listening on %s (%d accept threads)",
             self._config.data_pipe,
-            win32pipe.PIPE_ACCESS_DUPLEX,
-            win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
-            1,
-            _BUFFER,
-            _BUFFER,
-            0,
-            None,
+            self._config.pipe_listeners,
         )
-        self._running = True
-        log.info("Pipe server listening on %s", self._config.data_pipe)
-
-        while self._running:
-            try:
-                win32pipe.ConnectNamedPipe(self._pipe, None)
-            except pywintypes.error:
-                break
-
-            try:
-                _, data = win32file.ReadFile(self._pipe, _BUFFER)
-                request = json.loads(data.decode("utf-8"))
-                decision, _ = self._policy_manager.analyze(
-                    channel=request["channel"],
-                    kind=request["kind"],
-                    text=request.get("text"),
-                    file_path=request.get("file_path"),
-                )
-                win32file.WriteFile(self._pipe, decision.encode("utf-8"))
-                # Wait until the client has read the response before disconnecting.
-                # DisconnectNamedPipe discards unread data; FlushFileBuffers blocks
-                # until the client-side ReadAsync consumes the bytes.
-                win32file.FlushFileBuffers(self._pipe)
-            except Exception as e:
-                if self._running:  # suppress errors triggered by the shutdown sentinel
-                    log.error("Request handling error: %s", e)
-            finally:
-                try:
-                    win32pipe.DisconnectNamedPipe(self._pipe)
-                except pywintypes.error:
-                    pass
-
-        try:
-            win32file.CloseHandle(self._pipe)
-        except pywintypes.error:
-            pass
+        threads = [
+            threading.Thread(
+                target=self._accept_loop,
+                daemon=True,
+                name=f"pipe-accept-{i}",
+            )
+            for i in range(self._config.pipe_listeners)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
         log.info("Pipe server stopped.")
 
     def stop(self) -> None:
-        self._running = False
-        # Connect a throwaway client to unblock ConnectNamedPipe in the server thread.
-        # Closing the handle from another thread does not reliably unblock it on Windows.
-        if self._pipe is not None:
+        self._stop.set()
+        # Unblock each blocked ConnectNamedPipe with a throwaway client connection.
+        for _ in range(self._config.pipe_listeners):
             try:
                 h = win32file.CreateFile(
                     self._config.data_pipe,
@@ -87,3 +60,92 @@ class PipeServer:
                 win32file.CloseHandle(h)
             except pywintypes.error:
                 pass
+
+    def _accept_loop(self) -> None:
+        while not self._stop.is_set():
+            # Create a new pipe instance for this iteration.
+            # PIPE_UNLIMITED_INSTANCES avoids the nMaxInstances race where all
+            # slots are taken by the other accept threads + in-flight handles.
+            try:
+                handle = win32pipe.CreateNamedPipe(
+                    self._config.data_pipe,
+                    win32pipe.PIPE_ACCESS_DUPLEX,
+                    win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+                    win32pipe.PIPE_UNLIMITED_INSTANCES,
+                    _BUFFER,
+                    _BUFFER,
+                    0,
+                    None,
+                )
+            except pywintypes.error as exc:
+                log.error("CreateNamedPipe failed: %s", exc)
+                break
+
+            # Wait for a client to connect.
+            try:
+                win32pipe.ConnectNamedPipe(handle, None)
+            except pywintypes.error as exc:
+                if exc.winerror == _ERROR_PIPE_CONNECTED:
+                    # Client connected between CreateNamedPipe and ConnectNamedPipe.
+                    # Pipe is already connected — proceed normally.
+                    pass
+                else:
+                    win32file.CloseHandle(handle)
+                    continue
+
+            if self._stop.is_set():
+                try:
+                    win32pipe.DisconnectNamedPipe(handle)
+                    win32file.CloseHandle(handle)
+                except pywintypes.error:
+                    pass
+                return
+
+            self._handle_connection(handle)
+
+    def _handle_connection(self, handle) -> None:
+        """Read one request, analyze it, write the response, close the handle."""
+        try:
+            _, data = win32file.ReadFile(handle, _BUFFER)
+        except Exception as exc:
+            log.warning("ReadFile failed: %s", exc)
+            _close_pipe(handle)
+            return
+
+        try:
+            request = json.loads(data.decode("utf-8"))
+        except Exception as exc:
+            log.warning("JSON parse failed: %s", exc)
+            _close_pipe(handle)
+            return
+
+        log.debug(
+            "Request: channel=%s kind=%s",
+            request.get("channel"), request.get("kind"),
+        )
+
+        try:
+            decision, write_response = self._dispatcher.analyze(request)
+        except Exception as exc:
+            log.error("Dispatcher error: %s", exc)
+            decision, write_response = "BLOCK", True
+
+        if write_response:
+            try:
+                win32file.WriteFile(handle, decision.encode("utf-8"))
+                win32file.FlushFileBuffers(handle)
+            except Exception as exc:
+                log.warning("WriteFile failed: %s", exc)
+
+        _close_pipe(handle)
+
+
+def _close_pipe(handle) -> None:
+    try:
+        win32pipe.DisconnectNamedPipe(handle)
+    except pywintypes.error:
+        pass
+    try:
+        win32file.CloseHandle(handle)
+    except pywintypes.error:
+        pass

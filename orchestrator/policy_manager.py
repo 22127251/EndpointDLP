@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
+
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 from analyzer.engine import DLPEngine
 from analyzer.extractor import extract_tabular, extract_text, is_tabular
@@ -11,16 +15,52 @@ from orchestrator.config import OrchestratorConfig
 log = logging.getLogger(__name__)
 
 
+class _ReloadHandler(FileSystemEventHandler):
+    def __init__(self, manager: PolicyManager) -> None:
+        self._manager = manager
+        self._lock = threading.Lock()
+        self._timer: threading.Timer | None = None
+
+    def on_modified(self, event) -> None:
+        if Path(event.src_path).name != "policies.yaml":
+            return
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(0.5, self._manager._reload_engine)
+            self._timer.daemon = True
+            self._timer.start()
+
+
 class PolicyManager:
     def __init__(self, config: OrchestratorConfig) -> None:
         repo_root = Path(__file__).parent.parent
-        policies_path = repo_root / config.policies_file
-        log.info("Loading policies from %s", policies_path)
-        self._engine = DLPEngine(str(policies_path))
+        self._policies_file = str(repo_root / config.policies_file)
+        log.info("Loading policies from %s", self._policies_file)
+        self._engine = DLPEngine(self._policies_file)
         log.info("DLPEngine ready.")
+
+        self._observer = Observer()
+        handler = _ReloadHandler(self)
+        watch_dir = str(Path(self._policies_file).resolve().parent)
+        self._observer.schedule(handler, watch_dir, recursive=False)
+        self._observer.daemon = True
+        self._observer.start()
 
     def get_engine(self) -> DLPEngine:
         return self._engine
+
+    def _reload_engine(self) -> None:
+        try:
+            new_engine = DLPEngine(self._policies_file)
+            self._engine = new_engine  # atomic in CPython (GIL)
+            log.info("Policies reloaded from %s", self._policies_file)
+        except Exception as exc:
+            log.error("Policy reload failed, keeping old engine: %s", exc)
+
+    def stop(self) -> None:
+        self._observer.stop()
+        self._observer.join()
 
     def analyze(
         self,
@@ -29,17 +69,18 @@ class PolicyManager:
         text: str | None = None,
         file_path: str | None = None,
     ) -> tuple[str, list]:
+        engine = self._engine  # snapshot before any reload can swap it
         if kind == "text":
-            result = self._engine.analyze(text or "", channel)
+            result = engine.analyze(text or "", channel)
         elif kind == "file":
             if not file_path:
                 log.error("kind=file but no file_path provided; failing closed.")
                 return "BLOCK", []
             try:
                 if is_tabular(file_path):
-                    result = self._engine.analyze_tabular(extract_tabular(file_path), channel)
+                    result = engine.analyze_tabular(extract_tabular(file_path), channel)
                 else:
-                    result = self._engine.analyze(extract_text(file_path), channel)
+                    result = engine.analyze(extract_text(file_path), channel)
             finally:
                 try:
                     os.unlink(file_path)
