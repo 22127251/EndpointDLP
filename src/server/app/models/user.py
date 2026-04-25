@@ -1,4 +1,3 @@
-# app/models/user.py
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, Boolean, DateTime
@@ -13,7 +12,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), default="admin")
+    role: Mapped[str] = mapped_column(String(20), default="user")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
