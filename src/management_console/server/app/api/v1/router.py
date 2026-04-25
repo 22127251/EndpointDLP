@@ -1,6 +1,7 @@
 # app/api/v1/router.py
 from fastapi import APIRouter
-from app.api.v1 import auth, policies, agents
+from app.api.v1 import policies
+from app.api.v1 import agents, auth
 
 api_router = APIRouter(prefix="/api/v1")
 

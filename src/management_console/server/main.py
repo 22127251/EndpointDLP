@@ -39,7 +39,7 @@ app.include_router(api_router)
 from sqlalchemy import text
 @app.get("/db")
 async def test_db_connection():
-    from app.database import engine
+    from management_console.server.app.database import engine
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
