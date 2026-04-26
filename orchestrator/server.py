@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
+import uuid
 
 import pywintypes
 import win32file
@@ -119,10 +121,15 @@ class PipeServer:
             _close_pipe(handle)
             return
 
-        log.debug(
-            "Request: channel=%s kind=%s",
-            request.get("channel"), request.get("kind"),
-        )
+        req_id = uuid.uuid4().hex[:8]
+        request["req_id"] = req_id
+        if request.get("kind") == "text":
+            size = len(request.get("text", ""))
+        else:
+            fp = request.get("file_path", "")
+            size = os.path.getsize(fp) if fp and os.path.exists(fp) else 0
+        log.debug("recv req=%s channel=%s kind=%s size=%d",
+                  req_id, request.get("channel"), request.get("kind"), size)
 
         try:
             decision, write_response = self._dispatcher.analyze(request)

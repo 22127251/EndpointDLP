@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
@@ -68,14 +69,22 @@ class PolicyManager:
         kind: str,
         text: str | None = None,
         file_path: str | None = None,
+        req_id: str = "",
     ) -> tuple[str, list]:
         engine = self._engine  # snapshot before any reload can swap it
         if kind == "text":
-            result = engine.analyze(text or "", channel)
+            body = text or ""
+            result = engine.analyze(body, channel)
+            content_label = (
+                f"size={len(body)} hash={hashlib.sha256(body.encode()).hexdigest()[:8]}"
+            )
         elif kind == "file":
             if not file_path:
                 log.error("kind=file but no file_path provided; failing closed.")
                 return "BLOCK", []
+            filename = os.path.basename(file_path)
+            size = os.path.getsize(file_path)
+            content_label = f"file={filename} size={size}"
             try:
                 if is_tabular(file_path):
                     result = engine.analyze_tabular(extract_tabular(file_path), channel)
@@ -92,21 +101,29 @@ class PolicyManager:
 
         action = result.applied_action
         if action == "block":
-            log.warning(
-                "BLOCK | channel=%s | elapsed=%.1fms | violations=%s",
-                channel, result.elapsed_ms, _fmt_violations(result.violations),
-            )
+            log.warning("BLOCK req=%s channel=%s %s elapsed=%.1fms violations=[%s]",
+                        req_id, channel, content_label, result.elapsed_ms,
+                        _fmt_violations(result.violations))
             return "BLOCK", result.violations
         elif action == "allow_log":
-            log.info(
-                "ALLOW (logged) | channel=%s | elapsed=%.1fms | violations=%s",
-                channel, result.elapsed_ms, _fmt_violations(result.violations),
-            )
+            log.info("ALLOW(logged) req=%s channel=%s %s elapsed=%.1fms violations=[%s]",
+                     req_id, channel, content_label, result.elapsed_ms,
+                     _fmt_violations(result.violations))
             return "ALLOW", result.violations
         else:
-            log.debug("ALLOW | channel=%s | elapsed=%.1fms", channel, result.elapsed_ms)
+            log.debug("ALLOW req=%s channel=%s %s elapsed=%.1fms",
+                      req_id, channel, content_label, result.elapsed_ms)
             return "ALLOW", result.violations
 
 
 def _fmt_violations(violations: list) -> str:
-    return ", ".join(f"{v.policy_id}({v.action})" for v in violations)
+    parts = []
+    for v in violations:
+        positions = []
+        for m in v.matches:
+            if m.start is not None:
+                positions.append(f"{m.start}-{m.end}")
+            else:
+                positions.append(f"col={m.column_name} row={m.row}")
+        parts.append(f"{v.policy_id}({v.action})[{','.join(positions)}]")
+    return " ".join(parts)

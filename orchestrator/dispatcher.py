@@ -52,25 +52,29 @@ class Dispatcher:
     # ------------------------------------------------------------------ #
 
     def _analyze_browser(self, request: dict) -> str:
+        req_id = request.get("req_id", "?")
         future = self._browser_pool.submit(
             self._pm.analyze,
             request["channel"],
             request["kind"],
             text=request.get("text"),
             file_path=request.get("file_path"),
+            req_id=req_id,
         )
         try:
             decision, _violations = future.result(timeout=_ANALYSIS_TIMEOUT)
             return decision
         except FutureTimeoutError:
-            log.error("Browser analysis timed out after %.1fs; failing closed", _ANALYSIS_TIMEOUT)
+            log.error("timeout req=%s channel=browser after %.1fs; failing closed",
+                      req_id, _ANALYSIS_TIMEOUT)
             future.cancel()
             return "BLOCK"
         except Exception as exc:
-            log.error("Browser analysis error: %s", exc)
+            log.error("error req=%s channel=browser: %s", req_id, exc)
             return "BLOCK"
 
     def _analyze_clipboard(self, request: dict) -> tuple[str, bool]:
+        req_id = request.get("req_id", "?")
         with self._clip_lock:
             seq = self._clip_seq + 1
             self._clip_seq = seq
@@ -87,22 +91,24 @@ class Dispatcher:
                 request["kind"],
                 text=request.get("text"),
                 file_path=request.get("file_path"),
+                req_id=req_id,
             )
             try:
                 decision, _violations = future.result(timeout=_ANALYSIS_TIMEOUT)
             except FutureTimeoutError:
-                log.error("Clipboard analysis timed out; failing closed")
+                log.error("timeout req=%s clip_seq=%d; failing closed", req_id, seq)
                 future.cancel()
                 decision = "BLOCK"
             except Exception as exc:
-                log.error("Clipboard analysis error: %s", exc)
+                log.error("error req=%s clip_seq=%d: %s", req_id, seq, exc)
                 decision = "BLOCK"
         finally:
             with self._clip_lock:
                 self._clip_inflight.pop(seq, None)
 
         if cancel_flag.is_set():
-            log.info("clipboard seq=%d superseded, dropping decision", seq)
+            log.info("superseded req=%s clip_seq=%d by seq=%d decision=%s",
+                     req_id, seq, self._clip_seq, decision)
             return decision, False
 
         return decision, True
