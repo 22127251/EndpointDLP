@@ -1,13 +1,22 @@
 # app/api/deps.py
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.models.user import User
 from app.utils.security import decode_access_token
+from app.config import Settings
 
 security = HTTPBearer()
+
+async def verify_agent_token(x_agent_key: str = Header(...)):
+    if x_agent_key != Settings.AGENT_SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid agent"
+        )
+    return x_agent_key
 
 
 async def get_current_user(
@@ -30,3 +39,8 @@ async def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
+
+async def is_admin_user(current_user: User = Depends(get_current_user)):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin privileges required")
+    return current_user

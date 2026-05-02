@@ -1,11 +1,8 @@
-# app/schemas/policy.py
 from enum import StrEnum
-
 from pydantic import BaseModel, Field
 from uuid import UUID
 from datetime import datetime
-from typing import Literal
-from enum import StrEnum
+
 
 
 class PolicyAction(StrEnum):
@@ -24,10 +21,18 @@ class RuleType(StrEnum):
     REGEX = "regex"
 
 class PolicyCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255, examples=["Block copying Identification ID to USB"])
+    name: str = Field(..., min_length=1, max_length=255, examples=["Sensitive Data Policy"])
     description: str | None = None
     rule_type: RuleType
-    rule: dict
+    rule: dict = Field(
+        ...,
+        examples=[
+            {
+                "pattern": "\\b\\d{16}\\b",
+                "description": "Detect credit card numbers"
+            }
+        ]
+    )
     action: PolicyAction
     channel: PolicyChanel
     is_active: bool = True
@@ -46,13 +51,12 @@ class PolicyUpdate(BaseModel):
 class PolicyResponse(BaseModel):
     id: UUID
     name: str
-    description: str | None
+    description: str | None = None
     rule_type: RuleType
     rule: dict
     action: PolicyAction
     channel: PolicyChanel
     is_active: bool
-    created_by: UUID | None
     created_at: datetime
     updated_at: datetime
 

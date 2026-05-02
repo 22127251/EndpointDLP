@@ -35,18 +35,3 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
-## test database connection
-from sqlalchemy import text
-@app.get("/db")
-async def test_db_connection():
-    from management_console.server.app.database import engine
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return {"status": "success", "message": "Database connection successful"}
-    except Exception as e:
-        return {"status": "error", "message": f"Database connection failed: {str(e)}"}
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "service": settings.APP_NAME}

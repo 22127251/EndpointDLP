@@ -1,12 +1,11 @@
 import uuid
-from enum import StrEnum
 from datetime import datetime
 from sqlalchemy import String, Boolean, DateTime, Text, Enum
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 from sqlalchemy import func
-from app.schemas.policy import PolicyAction, PolicyChanel, RuleType
+from app.models.policy_assignment import policy_group_assignments, policy_agent_assignments
 
 
     
@@ -14,12 +13,12 @@ class Policy(Base):
     __tablename__ = "policies"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
-    rule_type: Mapped[RuleType] = mapped_column(Enum(RuleType, name="rule_type"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    rule_type: Mapped[str] = mapped_column(String(50), nullable=False)
     rule: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    action: Mapped[PolicyAction] = mapped_column(Enum(PolicyAction, name="policy_action"), nullable=False)
-    channel: Mapped[PolicyChanel] = mapped_column(Enum(PolicyChanel, name="policy_channel"), default=PolicyChanel.ALL )
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    channel: Mapped[str] = mapped_column(String(50), default="all" )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=func.now()
@@ -27,3 +26,6 @@ class Policy(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=func.now(), onupdate=func.now()
     )
+    
+    agent_groups = relationship("AgentGroup", secondary=policy_group_assignments, back_populates="policies")
+    individual_agents = relationship("Agent", secondary=policy_agent_assignments, back_populates="policies")
