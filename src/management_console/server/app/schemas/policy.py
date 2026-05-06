@@ -19,6 +19,7 @@ class PolicyChanel(StrEnum):
 
 class RuleType(StrEnum):
     REGEX = "regex"
+    KEYWORD = "keyword"
 
 class PolicyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, examples=["Sensitive Data Policy"])

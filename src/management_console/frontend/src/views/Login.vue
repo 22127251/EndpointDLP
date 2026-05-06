@@ -1,31 +1,26 @@
 <template>
   <div class="login-container">
     <el-card class="login-card">
-      <template #header>
-        <h2 style="text-align: center; margin: 0">DLP Management System</h2>
-      </template>
-
-      <el-form :model="loginForm" label-position="top">
-        <el-form-item label="Tài kho?n">
-          <el-input v-model="loginForm.username" placeholder="Nh?p username" />
+      <h2>DLP MANAGEMENT</h2>
+      <el-form :model="loginForm" @keyup.enter="handleLogin">
+        <el-form-item>
+          <el-input v-model="loginForm.username" placeholder="Username" />
         </el-form-item>
-
-        <el-form-item label="M?t kh?u">
+        <el-form-item>
           <el-input
             v-model="loginForm.password"
             type="password"
-            placeholder="Nh?p password"
+            placeholder="Password"
             show-password
           />
         </el-form-item>
-
         <el-button
           type="primary"
-          style="width: 100%"
-          @click="handleLogin"
           :loading="loading"
+          @click="handleLogin"
+          style="width: 100%"
         >
-          Ðãng nh?p
+          Login
         </el-button>
       </el-form>
     </el-card>
@@ -33,34 +28,31 @@
 </template>
 
 <script setup>
-import { ref, reactive } from "vue";
+import { ref } from "vue";
+import { useAuthStore } from "@/store/auth";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
+const auth = useAuthStore();
 const router = useRouter();
 const loading = ref(false);
-const loginForm = reactive({
-  username: "",
-  password: "",
-});
+const loginForm = ref({ username: "", password: "" });
 
-const handleLogin = () => {
-  if (!loginForm.username || !loginForm.password) {
-    return ElMessage.error("Please fill in all required fields!");
+const handleLogin = async () => {
+  if (!loginForm.value.username || !loginForm.value.password) {
+    return ElMessage.warning("Invalid username or password");
   }
-
   loading.value = true;
-
-  setTimeout(() => {
+  try {
+    await auth.login(loginForm.value.username, loginForm.value.password);
+    ElMessage.success("Login successful");
+    router.push("/");
+  } catch (error) {
+    ElMessage.error("Invalid username or password");
+    console.error("Login error:", error);
+  } finally {
     loading.value = false;
-    if (loginForm.username === "admin" && loginForm.password === "123456") {
-      localStorage.setItem("token", "fake-jwt-token");
-      ElMessage.success("Login successful!");
-      router.push("/");
-    } else {
-      ElMessage.error("Invalid username or password!");
-    }
-  }, 1000);
+  }
 };
 </script>
 
@@ -74,5 +66,7 @@ const handleLogin = () => {
 }
 .login-card {
   width: 400px;
+  padding: 20px;
+  text-align: center;
 }
 </style>

@@ -6,12 +6,14 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.user import User
 from app.utils.security import decode_access_token
-from app.config import Settings
+from app.config import get_settings
 
 security = HTTPBearer()
 
-async def verify_agent_token(x_agent_key: str = Header(...)):
-    if x_agent_key != Settings.AGENT_SECRET_KEY:
+async def verify_agent_token(
+        x_agent_key: str = Header(...)):
+    setting = get_settings()
+    if x_agent_key != setting.AGENT_SECRET_KEY: 
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid agent"

@@ -34,7 +34,7 @@ FOR /L %%i IN (%START%,1,%END%) DO (
     -H "accept: application/json" ^
     -H "Authorization: Bearer %AUTH_TOKEN%" ^
     -H "Content-Type: application/json" ^
-    -d "{\"name\":\"Policy %%i\",\"description\":\"Auto generated policy %%i\",\"rule_type\":\"regex\",\"rule\":{\"description\":\"Detect 16-digit number\",\"pattern\":\"\\\\b\\\\d{16}\\\\b\"},\"action\":\"!action!\",\"channel\":\"!channel!\",\"is_active\":true}"
+    -d "{\"name\":\"Policy %%i\",\"description\":\"Auto generated policy %%i\",\"rule_type\":\"regex\",\"rule\":{\"pattern\":\"\\\\b\\\\d{16}\\\\b\"},\"action\":\"!action!\",\"channel\":\"!channel!\",\"is_active\":true}"
 
   timeout /t 1 >nul
 )

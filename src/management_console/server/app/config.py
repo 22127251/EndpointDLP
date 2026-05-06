@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     ALGORITHM: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
     AGENT_SECRET_KEY: str
+    # Heartbeat
+    HEARTBEAT_INTERVAL_SECONDS: int = 60
 
     class Config:
         env_file = ".env"
