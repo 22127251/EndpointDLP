@@ -1,4 +1,5 @@
 import uuid
+from uuid6 import uuid7
 from datetime import datetime
 from sqlalchemy import String, Boolean, DateTime, Text, Enum
 from sqlalchemy.dialects.postgresql import JSONB
@@ -12,7 +13,7 @@ from app.models.policy_assignment import policy_group_assignments, policy_agent_
 class Policy(Base):
     __tablename__ = "policies"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     description: Mapped[str | None] = mapped_column(Text)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     rule_type: Mapped[str] = mapped_column(String(50), nullable=False)

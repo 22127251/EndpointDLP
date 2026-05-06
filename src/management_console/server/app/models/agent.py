@@ -1,4 +1,5 @@
 import uuid
+from uuid6 import uuid7
 from datetime import datetime
 from sqlalchemy import String, DateTime, ForeignKey, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -16,7 +17,7 @@ class AgentStatus(StrEnum):
 class Agent(Base):
     __tablename__ = "agents"
 
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     description: Mapped[str | None] = mapped_column(Text)
     hostname: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     status: Mapped[AgentStatus] = mapped_column(

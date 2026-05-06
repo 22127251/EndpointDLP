@@ -10,7 +10,7 @@ class PolicyAction(StrEnum):
     ALERT = "alert"
     ALLOW = "allow"
 
-class PolicyChanel(StrEnum):
+class PolicyChannel(StrEnum):
     ALL = "all"
     EMAIL = "email"
     CLIPBOARD = "clipboard"
@@ -22,11 +22,17 @@ class RuleType(StrEnum):
     KEYWORD = "keyword"
 
 class PolicyCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255, examples=["Sensitive Data Policy"])
+    name: str = Field(
+        ..., 
+        min_length=1, max_length=255, 
+        examples=["Sensitive Data Policy"]
+    )
     description: str | None = None
     rule_type: RuleType
     rule: dict = Field(
         ...,
+        min_length=1,
+        max_length=500,
         examples=[
             {
                 "pattern": "\\b\\d{16}\\b",
@@ -35,7 +41,7 @@ class PolicyCreate(BaseModel):
         ]
     )
     action: PolicyAction
-    channel: PolicyChanel
+    channel: PolicyChannel
     is_active: bool = True
 
 
@@ -45,7 +51,7 @@ class PolicyUpdate(BaseModel):
     rule_type: RuleType | None = None
     rule: dict | None = None
     action: PolicyAction | None = None
-    channel: PolicyChanel | None = None
+    channel: PolicyChannel | None = None
     is_active: bool | None = None
 
 
@@ -56,7 +62,7 @@ class PolicyResponse(BaseModel):
     rule_type: RuleType
     rule: dict
     action: PolicyAction
-    channel: PolicyChanel
+    channel: PolicyChannel
     is_active: bool
     created_at: datetime
     updated_at: datetime
