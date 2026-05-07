@@ -4,15 +4,15 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from app.database import get_db
-from app.models.log import ViolationLog
+from app.models.violation_log import ViolationLog
 from app.models.agent import Agent
 from app.models.policy import Policy
-from app.schemas.log import ViolationLogCreate, ViolationLogResponse
+from app.schemas.violation_log import ViolationLogCreate
 from app.api.deps import verify_agent_token, get_current_user
 from app.models.user import User
 
 
-router = APIRouter(prefix="/logs", tags=["Logs"])
+router = APIRouter(prefix="/violation-logs", tags=["Logs"])
 
 @router.post("/", status_code=201)
 async def create_violation_log(
