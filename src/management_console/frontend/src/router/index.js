@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory } from "vue-router";
 import MainLayout from "@/layouts/MainLayout.vue";
-
 const routes = [
   {
     path: "/login",
@@ -33,9 +32,14 @@ const routes = [
         component: () => import("@/views/Policies.vue"),
       },
       {
-        path: "alerts",
-        name: "Alerts",
-        component: () => import("@/views/Alerts.vue"),
+        path: "violation-log",
+        name: "ViolationLog",
+        component: () => import("@/views/ViolationLogs.vue"),
+      },
+      {
+        path: "settings",
+        name: "Settings",
+        component: () => import("@/views/Settings.vue"),
       },
     ],
   },

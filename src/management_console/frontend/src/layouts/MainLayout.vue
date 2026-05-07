@@ -25,10 +25,10 @@
           <span>Policies</span>
         </el-menu-item>
 
-        <!-- <el-menu-item index="/alerts">
+        <el-menu-item index="/violation-log">
           <el-icon><Warning /></el-icon>
-          <span>Alerts & Logs</span>
-        </el-menu-item> -->
+          <span>Violation Logs</span>
+        </el-menu-item>
 
         <el-menu-item index="/agents">
           <el-icon><Monitor /></el-icon>
@@ -43,10 +43,10 @@
 
       <div class="sidebar-footer">
         <el-menu class="sidebar-menu" router>
-          <!-- <el-menu-item index="/settings">
+          <el-menu-item index="/settings">
             <el-icon><Setting /></el-icon>
             <span>Settings</span>
-          </el-menu-item> -->
+          </el-menu-item>
           <el-menu-item @click="handleLogout">
             <el-icon><SwitchButton /></el-icon>
             <span>Logout</span>
