@@ -7,6 +7,7 @@ from app.schemas.user import UserCreate, UserRole, UserUpdate, UserResponse
 from app.api.deps import get_current_user, is_admin_user
 from uuid import UUID
 from app.utils.security import hash_password
+from app.services.audit_log_service import add_audit_log
 
 router = APIRouter(prefix="/users", tags=["Users"], dependencies=[Depends(get_current_user)])
 
@@ -43,6 +44,18 @@ async def create_user(
 ):
     new_user = User(**data.model_dump(exclude={"password"}), hashed_password=hash_password(data.password))
     db.add(new_user)
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=None,
+        username=None,
+        action="create_user",
+        target_type="user",
+        target_id=str(new_user.id),
+        description=f"Created user '{new_user.username}' with ID {new_user.id}"
+    )
+
     await db.commit()
     return new_user
 
@@ -62,6 +75,17 @@ async def update_user(
     for key, value in update_dict.items():
         setattr(user, key, value)
         
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=None,
+        username=None,
+        action="update_user",
+        target_type="user",
+        target_id=str(user.id),
+        description=f"Updated user '{user.username}' with ID {user.id}"
+    )
+
     await db.commit()
     return user
 
@@ -76,6 +100,17 @@ async def delete_user(
     
     if user.role == UserRole.ADMIN:
         raise HTTPException(400, "Cannot delete an admin user")
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=None,
+        username=None,
+        action="delete_user",
+        target_type="user",
+        target_id=str(user.id),
+        description=f"Deleted user '{user.username}' with ID {user.id}"
+    )
 
     await db.delete(user)
     await db.commit()
