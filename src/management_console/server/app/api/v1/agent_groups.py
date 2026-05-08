@@ -9,8 +9,8 @@ from app.models.user import User
 from app.api.deps import get_current_user
 from app.schemas.agent_group import AgentGroupCreate, AgentGroupResponse, AddMembersRequest
 from sqlalchemy.orm import selectinload
-
 from app.models.agent import Agent
+from app.services.audit_log_service import add_audit_log
 
 router = APIRouter(prefix="/agent-groups", tags=["Agent Groups"])
 
@@ -38,6 +38,18 @@ async def list_agent_groups(
         item.member_count = len(group.agents)
         items.append(item)
 
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="list_agent_groups",
+        target_type="agent_group",
+        target_id=None,
+        description=f"Listed agent groups - page {page}, page_size {page_size}"
+    )
+    await db.commit()
+
     return {
         "items": items,
         "page": page, 
@@ -53,6 +65,18 @@ async def create_agent_group(
 ):
     group = AgentGroup(**data.model_dump())
     db.add(group)
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="create_agent_group",
+        target_type="agent_group",
+        target_id=None,
+        description=f"Created agent group '{group.name}' with ID {group.id}"
+    )
+
     await db.commit()
     await db.refresh(group)
     return AgentGroupResponse(
@@ -91,6 +115,18 @@ async def add_agents_to_group(
     for agent in agents:
         agent.group_id = group_id
 
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="add_agents_to_group",
+        target_type="agent_group",
+        target_id=str(group_id),
+        description=f"Added agents to group '{group.name}' with ID {group.id}"
+    )
+
     await db.commit()
 
     return {"message": f"Added {len(agents)} new agents to group '{group.name}'"}
@@ -108,6 +144,18 @@ async def remove_agent_from_group(
         raise HTTPException(status_code=404, detail="Agent not found in the specified group")
     
     agent.group_id = None
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="remove_agent_from_group",
+        target_type="agent_group",
+        target_id=str(group_id),
+        description=f"Removed agent '{agent.hostname}' with ID {agent.id} from group ID {group_id}"
+    )
+
     await db.commit()
 
     return {"message": f"Agent '{agent.hostname}' removed from group successfully"}
@@ -122,6 +170,18 @@ async def delete_agent_group(
     group = await db.get(AgentGroup, group_id)
     if not group:
         raise HTTPException(status_code=404, detail="Group does not exist")
+    
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="delete_agent_group",
+        target_type="agent_group",
+        target_id=str(group_id),
+        description=f"Deleted agent group '{group.name}' with ID {group.id}"
+    )
+    
     await db.delete(group)
     await db.commit()
     return {"message": f"Group '{group.name}' deleted successfully"}
