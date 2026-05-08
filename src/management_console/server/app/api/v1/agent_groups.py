@@ -38,18 +38,6 @@ async def list_agent_groups(
         item.member_count = len(group.agents)
         items.append(item)
 
-    # audit log
-    await add_audit_log(
-        db=db,
-        user_id=current_user.id,
-        username=current_user.username,
-        action="list_agent_groups",
-        target_type="agent_group",
-        target_id=None,
-        description=f"Listed agent groups - page {page}, page_size {page_size}"
-    )
-    await db.commit()
-
     return {
         "items": items,
         "page": page, 
@@ -181,7 +169,7 @@ async def delete_agent_group(
         target_id=str(group_id),
         description=f"Deleted agent group '{group.name}' with ID {group.id}"
     )
-    
+
     await db.delete(group)
     await db.commit()
     return {"message": f"Group '{group.name}' deleted successfully"}

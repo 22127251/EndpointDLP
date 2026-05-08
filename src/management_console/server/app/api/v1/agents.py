@@ -61,16 +61,6 @@ async def list_agents(
         agent.policies = policies
         items.append(AgentResponse.model_validate(agent))
 
-    # audit log
-    await add_audit_log(
-        db=db,
-        user_id=current_user.id,
-        username=current_user.username,
-        action="list_agents",
-        target_type="agent",
-        description=f"Listed agents from page {page} with page size {page_size} and status filter {status}"
-    )
-    await db.commit()
 
     return { 
         "items": [AgentResponse.model_validate(a) for a in agents],
@@ -98,17 +88,6 @@ async def get_agent(
 
     agent.policies = policies
     
-    # audit log
-    await add_audit_log(
-        db=db,
-        user_id=current_user.id,
-        username=current_user.username,
-        action="get_agent",
-        target_type="agent",
-        target_id=str(agent.id),
-        description=f"Retrieved agent details for agent {agent.id}"
-    )
-    await db.commit()
 
     return AgentResponse.model_validate(agent)
 
