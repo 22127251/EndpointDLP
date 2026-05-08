@@ -11,12 +11,17 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 class LoginRequest(BaseModel):
     username: str
     password: str
+    
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
+
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(
+    request: LoginRequest,
+    db: AsyncSession = Depends(get_db)
+):
     result = await db.execute(select(User).where(User.username == request.username))
     user = result.scalar_one_or_none()
 
@@ -29,6 +34,12 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
             detail="Invalid username or password",
         )
 
-    access_token = create_access_token(data={"sub": str(user.id), "role": user.role, "username": user.username})
+    access_token = create_access_token(
+        data={
+            "sub": str(user.id), 
+            "role": user.role, 
+            "username": user.username
+        }
+    )
     return TokenResponse(access_token=access_token)
 
