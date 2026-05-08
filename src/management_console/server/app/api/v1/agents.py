@@ -13,6 +13,7 @@ from app.models.agent_group import AgentGroup
 from app.api.deps import get_current_user, verify_agent_token
 from app.services.policy_service import get_combined_policies_for_agent
 from fastapi.encoders import jsonable_encoder
+from app.services.audit_log_service import add_audit_log
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
 
@@ -60,6 +61,17 @@ async def list_agents(
         agent.policies = policies
         items.append(AgentResponse.model_validate(agent))
 
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="list_agents",
+        target_type="agent",
+        description=f"Listed agents from page {page} with page size {page_size} and status filter {status}"
+    )
+    await db.commit()
+
     return { 
         "items": [AgentResponse.model_validate(a) for a in agents],
         "page": page,
@@ -86,6 +98,18 @@ async def get_agent(
 
     agent.policies = policies
     
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="get_agent",
+        target_type="agent",
+        target_id=str(agent.id),
+        description=f"Retrieved agent details for agent {agent.id}"
+    )
+    await db.commit()
+
     return AgentResponse.model_validate(agent)
 
 @router.get("/{agent_id}/config")
@@ -117,6 +141,18 @@ async def get_agent_config(
             allow_unicode=True, 
             default_flow_style=False
         )
+
+        # audit log
+        await add_audit_log(
+            db=db,
+            user_id="agent",
+            username=f"agent_{agent.id}",
+            action="download_config",
+            target_type="agent",
+            target_id=str(agent.id),
+            description=f"Agent {agent.id} downloaded its configuration in YAML format"
+        )
+        await db.commit()
         
         return Response(
             content=yaml_content,
@@ -125,6 +161,18 @@ async def get_agent_config(
                 "Content-Disposition": f"attachment; filename=agent_{agent.id}_config.yaml"
             }
         )
+    
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id="agent",
+        username=f"agent_{agent.id}",
+        action="download_config",
+        target_type="agent",
+        target_id=str(agent.id),
+        description=f"Agent {agent.id} downloaded its configuration in JSON format"
+    )
+    await db.commit()
 
     return agent_data
 
@@ -138,6 +186,19 @@ async def register_agent(
     
     agent = Agent(**data)
     db.add(agent)
+    
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id="agent",
+        username=f"agent_{agent.hostname}",
+        action="register",
+        target_type="agent",
+        target_id=str(agent.id),
+        description=f"Registered new agent with hostname {agent.hostname}"
+    )
+
+
     await db.commit()
     await db.refresh(agent)
     return AgentResponse.model_validate(agent)
@@ -210,6 +271,17 @@ async def update_agent(
     for key, value in update_agent.items():
         setattr(agent, key, value)
     
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="update_agent",
+        target_type="agent",
+        target_id=str(agent.id),
+        description=f"Updated agent {agent.id} with data {update_agent}"
+    )
+
     await db.commit()
     return {"status": "ok"}
 
@@ -224,6 +296,16 @@ async def delete_agent(
     if not agent:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="delete_agent",
+        target_type="agent",
+        target_id=str(agent.id),
+        description=f"Deleted agent {agent.hostname} with ID {agent.id}"
+    )
     await db.delete(agent)
     await db.commit()
     return {"status": "ok", "message": f"Agent '{agent.hostname}' deleted successfully"}
