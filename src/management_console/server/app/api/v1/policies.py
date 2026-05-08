@@ -1,15 +1,16 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.policy import Policy
 from app.models.user import User
 from app.schemas.policy import PolicyCreate, PolicyUpdate, PolicyResponse
-from app.api.deps import get_current_user, verify_agent_token
+from app.api.deps import get_current_user
 from app.models.agent import Agent
 from app.models.agent_group import AgentGroup
+from app.services.audit_log_service import add_audit_log
 
 router = APIRouter(prefix="/policies", tags=["Policies"])
 
@@ -50,6 +51,18 @@ async def create_policy(
     data = policy_data.model_dump(mode="json")
     policy = Policy(**data)
     db.add(policy)
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="create_policy",
+        target_type="policy",
+        target_id=str(policy.id),
+        description=f"Created policy '{policy.name}' with ID {policy.id}"
+    )
+
     await db.commit()
     await db.refresh(policy)
     return PolicyResponse.model_validate(policy)
@@ -83,6 +96,18 @@ async def update_policy(
     for key, value in update_data.items():
         setattr(policy, key, value)
 
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="update_policy",
+        target_type="policy",
+        target_id=str(policy.id),
+        description=f"Updated policy '{policy.name}' with data {update_data}"
+    )
+
     await db.commit()
     await db.refresh(policy)
     return PolicyResponse.model_validate(policy)
@@ -98,6 +123,17 @@ async def delete_policy(
     if not policy:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy not found")
     
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="delete_policy",
+        target_type="policy",
+        target_id=str(policy.id),
+        description=f"Deleted policy '{policy.name}' with ID {policy.id}"
+    )
+
     await db.delete(policy)
     await db.commit()
 
@@ -122,6 +158,18 @@ async def assign_policy_to_agents(
     agents = result.scalars().all()
     
     policy.individual_agents = list(agents)
+
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="assign_policy_to_agents",
+        target_type="policy",
+        target_id=str(policy.id),
+        description=f"Assigned policy '{policy.name}' to {len(agents)} agents"
+    )
+
     await db.commit()
     return {"message": f"Policy assigned to {len(agents)} agents"}
 
@@ -146,5 +194,15 @@ async def assign_policy_to_groups(
     groups = result.scalars().all()
     
     policy.agent_groups = list(groups) 
+    # audit log
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="assign_policy_to_groups",
+        target_type="policy",
+        target_id=str(policy.id),
+        description=f"Assigned policy '{policy.name}' to {len(groups)} groups"
+    )
     await db.commit()
     return {"message": f"Policy assigned to {len(groups)} groups"}
