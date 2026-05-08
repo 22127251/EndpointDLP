@@ -19,10 +19,8 @@
           @select="handleCategorySelect"
           class="settings-menu"
         >
-          <el-menu-item index="commonly">Commonly Used</el-menu-item>
-          <el-menu-item index="server">Server Config</el-menu-item>
           <el-menu-item index="agent">Agent Behavior</el-menu-item>
-          <el-menu-item index="security">Security & Privacy</el-menu-item>
+          <el-menu-item index="log">Log Management</el-menu-item>
         </el-menu>
       </el-aside>
 
@@ -107,29 +105,35 @@ const loading = ref(false);
 const saving = ref(false);
 const isDirty = ref(false);
 const searchQuery = ref("");
-const activeCategory = ref("commonly");
+const activeCategory = ref("agent");
 
 const rawSettings = ref({});
 
 const settingsSchema = [
   {
-    id: "commonly",
-    title: "Commonly Used",
+    id: "agent",
+    title: "Agent Behavior",
     settings: [
       {
         key: "HEARTBEAT_INTERVAL_SECONDS",
         label: "Heartbeat Interval",
         description:
-          "Controls how often (in seconds) the agent check-in with the server.",
+          "How often (in seconds) the agent check-in with the server.",
         type: "number",
       },
       {
-        key: "LOG_RETENTION_DAYS",
-        label: "Log Retention Days",
+        key: "OFFLINE_SCAN_INTERVAL_SECONDS",
+        label: "Offline Scan Interval",
         description:
-          "Controls how many days of logs are retained on the agent.",
+          "How often (in seconds) the server checks for offline agents.",
         type: "number",
       },
+    ],
+  },
+  {
+    id: "violation log",
+    title: "Log Settings",
+    settings: [
       {
         key: "AUTO_CLEAN_UP_LOG",
         label: "Auto Clean Up Logs",
@@ -138,33 +142,15 @@ const settingsSchema = [
         type: "boolean",
         options: [true, false],
       },
-      // {
-      //   key: "log_level",
-      //   label: "Log Level",
-      //   description: "Defines the verbosity of the agent logs.",
-      //   type: "select",
-      //   options: ["info", "debug", "warning", "error"],
-      // },
+      {
+        key: "LOG_RETENTION_DAYS",
+        label: "Log Retention Days",
+        description:
+          "Controls how many days of logs are retained on the agent.",
+        type: "number",
+      },
     ],
   },
-  // {
-  //   id: "server",
-  //   title: "Server Config",
-  //   settings: [
-  //     {
-  //       key: "server_url",
-  //       label: "Server URL",
-  //       description: "The public endpoint URL that agents use to communicate.",
-  //       type: "text",
-  //     },
-  //     {
-  //       key: "maintenance_mode",
-  //       label: "Maintenance Mode",
-  //       description: "If enabled, agents will stop sending logs temporarily.",
-  //       type: "boolean",
-  //     },
-  //   ],
-  // },
 ];
 const modifiedSettings = ref({});
 
@@ -201,15 +187,6 @@ const saveSettings = async () => {
 
   saving.value = true;
   console.log("Modified settings to save:", modifiedSettings);
-  // const payload = {
-  //   settings: {
-  //     HEARTBEAT_INTERVAL_SECONDS: Number(
-  //       rawSettings.value.HEARTBEAT_INTERVAL_SECONDS,
-  //     ),
-  //     LOG_RETENTION_DAYS: Number(rawSettings.value.LOG_RETENTION_DAYS),
-  //     AUTO_CLEAN_UP_LOG: Boolean(rawSettings.value.AUTO_CLEAN_UP_LOG),
-  //   },
-  // };
   const payload = {
     settings: {},
   };

@@ -3,8 +3,7 @@
     <!-- Sidebar -->
     <el-aside width="240px" class="sidebar">
       <div class="logo-section">
-        <el-icon :size="24" color="#0d8a94"><Shield /></el-icon>
-        <span class="logo-text">ENDPOINT DLP</span>
+        <span class="logo-text">OURDLP</span>
       </div>
 
       <el-menu
@@ -66,32 +65,33 @@
     </el-aside>
 
     <el-container>
-      <!-- Header -->
       <el-header class="header">
-        <div class="header-search">
-          <el-input
-            :prefix-icon="Search"
-            placeholder="Search policies, agents..."
-            style="width: 400px"
-          />
+        <div class="header-left">
+          <!-- BREADCRUMBS -->
+          <el-breadcrumb separator="/">
+            <el-breadcrumb-item :to="{ path: '/' }">Home</el-breadcrumb-item>
+            <el-breadcrumb-item v-if="$route.name">{{
+              $route.name
+            }}</el-breadcrumb-item>
+          </el-breadcrumb>
         </div>
-        <div
-          class="header-user"
-          @click="$router.push('/profile')"
-          title="Go to Profile"
-        >
+
+        <div class="header-right">
           <el-divider direction="vertical" />
-          <div class="user-info">
-            <span class="user-name">{{ auth.userDisplayName }}</span>
-            <span class="user-role">{{ auth.userRoleLabel }}</span>
+
+          <!-- USER PROFILE CLICKABLE -->
+          <div class="user-profile" @click="$router.push('/profile')">
+            <div class="user-info">
+              <span class="user-name">{{ auth.userDisplayName }}</span>
+              <span class="user-role">{{ auth.userRoleLabel }}</span>
+            </div>
+            <el-avatar
+              :size="32"
+              src="https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png"
+            />
           </div>
-          <el-avatar
-            :size="32"
-            src="https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png"
-          />
         </div>
       </el-header>
-
       <!-- Main Content -->
       <el-main class="content-area">
         <router-view />
@@ -101,7 +101,16 @@
 </template>
 
 <script setup>
-import { Search } from "@element-plus/icons-vue";
+import {
+  Menu,
+  Warning,
+  Lock,
+  Monitor,
+  Files,
+  User,
+  Setting,
+  SwitchButton,
+} from "@element-plus/icons-vue";
 import { useRouter } from "vue-router";
 import { useAuthStore } from "@/store/auth";
 const auth = useAuthStore();
@@ -159,19 +168,25 @@ const handleLogout = () => {
   justify-content: space-between;
   padding: 0 24px;
 }
-.header-user {
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.user-profile {
   display: flex;
   align-items: center;
   gap: 12px;
   cursor: pointer;
-  padding: 5px 10px;
-  border-radius: 8px;
-  transition: background 0.2s;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.2s;
 }
-.header-user:hover {
-  background: #f1f5f9;
+.user-profile:hover {
+  background-color: #f1f5f9;
 }
-
 .user-info {
   display: flex;
   flex-direction: column;
@@ -179,12 +194,12 @@ const handleLogout = () => {
 }
 .user-name {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   color: #1e293b;
 }
 .user-role {
   font-size: 11px;
-  color: #64748b;
+  color: #94a3b8;
 }
 
 .content-area {

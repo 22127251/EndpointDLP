@@ -1,43 +1,51 @@
 # backend/app/services/offline_checker.py
 import asyncio
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import update
+from sqlalchemy import select, update
 from app.database import async_session_maker
-from app.config import get_settings
 from app.models.agent import Agent, AgentStatus
+from app.models.setting import ServerConfiguration
 
-settings = get_settings()
+
 
 async def offline_checker_loop():
+
     while True:
+        offline_interval = 60
         try:
-            await check_and_mark_offline()
+            async with async_session_maker() as session:
+                config_result = await session.execute(select(ServerConfiguration).where(ServerConfiguration.id == 1))
+                config = config_result.scalar_one_or_none()
+                if config and config.settings:
+                    offline_interval = config.settings.get("OFFLINE_SCAN_INTERVAL_SECONDS", 60)
+                
+                await check_and_mark_offline(session, config)
         except Exception as e:
             print(f"[OfflineChecker] Error: {e}")
 
-        await asyncio.sleep(60)
+        offline_interval = max(offline_interval, 30)
+        await asyncio.sleep(offline_interval)
 
 
-async def check_and_mark_offline():
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        seconds=settings.HEARTBEAT_INTERVAL_SECONDS
-    )
+async def check_and_mark_offline(session, config):
+    
+    try:
+        heartbeat_seconds = config.settings.get("HEARTBEAT_INTERVAL_SECONDS", 300) if config and config.settings else 300
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=heartbeat_seconds)
 
-    async with async_session_maker() as session:
-        try:
-            result = await session.execute(
-                update(Agent)
-                .where(
-                    Agent.status    == AgentStatus.ACTIVE,
-                    Agent.last_seen <  cutoff
-                )
-                .values(status=AgentStatus.OFFLINE)
+        result = await session.execute(
+            update(Agent)
+            .where(
+                Agent.status == AgentStatus.ACTIVE,
+                Agent.last_seen < cutoff
             )
-            await session.commit()
+            .values(status=AgentStatus.OFFLINE)
+        )
+        await session.commit()
 
-            if result.rowcount > 0:
-                print(f"[OfflineChecker] Marked {result.rowcount} agents as offline")
+        if result.rowcount > 0:
+            print(f"[OfflineChecker] Marked {result.rowcount} agents as offline")
 
-        except Exception:
-            await session.rollback()
-            raise
+    except Exception:
+        await session.rollback()
+        raise
