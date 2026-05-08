@@ -1,7 +1,7 @@
 # app/api/v1/router.py
 from fastapi import APIRouter
 from app.api.v1 import policies
-from app.api.v1 import agents, auth, agent_groups, metadata, violation_logs, settings, users
+from app.api.v1 import agents, auth, agent_groups, metadata, violation_logs, settings, users, audit_logs
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -13,5 +13,6 @@ api_router.include_router(metadata.router)
 api_router.include_router(violation_logs.router)
 api_router.include_router(settings.router)
 api_router.include_router(users.router)
+api_router.include_router(audit_logs.router)
 
 # api_router.include_router(dashboard.router)
