@@ -15,6 +15,7 @@
         text-color="#64748b"
         active-text-color="#0d8a94"
       >
+        <div class="sidebar-group-label">GENERAL</div>
         <!-- <el-menu-item index="/dashboard">
           <el-icon><Menu /></el-icon>
           <span>Dashboard</span>
@@ -23,11 +24,6 @@
         <el-menu-item index="/policies">
           <el-icon><Lock /></el-icon>
           <span>Policies</span>
-        </el-menu-item>
-
-        <el-menu-item index="/violation-log">
-          <el-icon><Warning /></el-icon>
-          <span>Violation Logs</span>
         </el-menu-item>
 
         <el-menu-item index="/agents">
@@ -39,11 +35,25 @@
           <el-icon><Files /></el-icon>
           <span>Agent Groups</span>
         </el-menu-item>
+
+        <template v-if="auth.isAdmin">
+          <div class="sidebar-group-label admin-label">ADMINISTRATION</div>
+
+          <el-menu-item index="/violation-log">
+            <el-icon><Warning /></el-icon>
+            <span>Violation Logs</span>
+          </el-menu-item>
+
+          <el-menu-item index="/users">
+            <el-icon><User /></el-icon>
+            <span>User Management</span>
+          </el-menu-item>
+        </template>
       </el-menu>
 
       <div class="sidebar-footer">
         <el-menu class="sidebar-menu" router>
-          <el-menu-item index="/settings">
+          <el-menu-item v-if="auth.isAdmin" index="/settings">
             <el-icon><Setting /></el-icon>
             <span>Settings</span>
           </el-menu-item>
@@ -65,11 +75,15 @@
             style="width: 400px"
           />
         </div>
-        <div class="header-user">
+        <div
+          class="header-user"
+          @click="$router.push('/profile')"
+          title="Go to Profile"
+        >
           <el-divider direction="vertical" />
           <div class="user-info">
-            <span class="user-name">Admin User</span>
-            <span class="user-role">Security Lead</span>
+            <span class="user-name">{{ auth.userDisplayName }}</span>
+            <span class="user-role">{{ auth.userRoleLabel }}</span>
           </div>
           <el-avatar
             :size="32"
@@ -89,6 +103,8 @@
 <script setup>
 import { Search } from "@element-plus/icons-vue";
 import { useRouter } from "vue-router";
+import { useAuthStore } from "@/store/auth";
+const auth = useAuthStore();
 
 const router = useRouter();
 
@@ -146,8 +162,16 @@ const handleLogout = () => {
 .header-user {
   display: flex;
   align-items: center;
-  gap: 15px;
+  gap: 12px;
+  cursor: pointer;
+  padding: 5px 10px;
+  border-radius: 8px;
+  transition: background 0.2s;
 }
+.header-user:hover {
+  background: #f1f5f9;
+}
+
 .user-info {
   display: flex;
   flex-direction: column;
@@ -171,5 +195,16 @@ const handleLogout = () => {
 :deep(.el-menu-item.is-active) {
   border-left: 3px solid #0d8a94;
   background-color: #f0fdfa !important;
+}
+
+.sidebar-group-label {
+  padding: 20px 20px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #94a3b8;
+  letter-spacing: 1px;
+}
+.admin-label {
+  color: #f87171;
 }
 </style>

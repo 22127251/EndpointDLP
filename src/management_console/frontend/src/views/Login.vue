@@ -44,8 +44,11 @@ const handleLogin = async () => {
   }
   loading.value = true;
   try {
-    await auth.login(loginForm.value.username, loginForm.value.password);
-    ElMessage.success("Login successful");
+    const data = await auth.login(
+      loginForm.value.username,
+      loginForm.value.password,
+    );
+    ElMessage.success(`Welcome, ${auth.userDisplayName}!`);
     router.push("/");
   } catch (error) {
     ElMessage.error("Invalid username or password");

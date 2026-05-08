@@ -1,131 +1,369 @@
 <template>
-  <div class="page-container">
-    <div class="header-section">
-      <div>
-        <h1 class="title">Server Settings</h1>
-        <p class="subtitle">
-          Configure global parameters for the DLP environment.
-        </p>
-      </div>
+  <div class="page-container settings-page">
+    <!-- TOP SEARCH BAR -->
+    <div class="settings-search-container">
+      <el-input
+        v-model="searchQuery"
+        placeholder="Search settings..."
+        :prefix-icon="Search"
+        clearable
+        class="search-input"
+      />
     </div>
 
-    <el-card shadow="never" style="max-width: 800px">
-      <el-tabs v-model="activeTab">
-        <el-tab-pane label="General Configuration" name="general">
-          <el-form :model="settings" label-position="top" v-loading="loading">
-            <el-row :gutter="20">
-              <el-col :span="12">
-                <el-form-item label="Agent Heartbeat Interval (seconds)">
-                  <el-input-number
-                    v-model="settings.heartbeat_interval"
-                    :min="10"
-                    :max="3600"
-                    style="width: 100%"
-                  />
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="Violation Log Retention (days)">
-                  <el-input-number
-                    v-model="settings.log_retention_days"
-                    :min="1"
-                    :max="365"
-                    style="width: 100%"
-                  />
-                </el-form-item>
-              </el-col>
-            </el-row>
+    <el-container class="settings-main-container">
+      <!-- SIDEBAR: CATEGORIES -->
+      <el-aside width="220px" class="settings-sidebar">
+        <el-menu
+          :default-active="activeCategory"
+          @select="handleCategorySelect"
+          class="settings-menu"
+        >
+          <el-menu-item index="commonly">Commonly Used</el-menu-item>
+          <el-menu-item index="server">Server Config</el-menu-item>
+          <el-menu-item index="agent">Agent Behavior</el-menu-item>
+          <el-menu-item index="security">Security & Privacy</el-menu-item>
+        </el-menu>
+      </el-aside>
 
-            <el-form-item label="Server Endpoint URL">
-              <el-input
-                v-model="settings.server_url"
-                placeholder="https://dlp-api.company.com"
-              />
-            </el-form-item>
+      <!-- MAIN CONTENT: SCROLLABLE LIST -->
+      <el-main class="settings-content">
+        <div
+          v-for="cat in filteredSchema"
+          :key="cat.id"
+          :id="`section-${cat.id}`"
+          class="settings-section"
+        >
+          <h2 class="section-title">{{ cat.title }}</h2>
 
-            <el-form-item label="Global Alert Email">
-              <el-input
-                v-model="settings.alert_email"
-                placeholder="security-alerts@company.com"
-              />
-            </el-form-item>
-
-            <el-divider />
-
-            <div style="text-align: right">
-              <el-button :icon="Refresh" @click="fetchSettings"
-                >Reset</el-button
-              >
-              <el-button
-                type="primary"
-                @click="handleUpdate"
-                :loading="updating"
-                >Save Settings</el-button
-              >
+          <div
+            v-for="item in cat.settings"
+            :key="item.key"
+            class="setting-item"
+          >
+            <div class="setting-info">
+              <div class="setting-label">
+                {{ cat.id }}: <span class="label-bold">{{ item.label }}</span>
+              </div>
+              <div class="setting-description">{{ item.description }}</div>
             </div>
-          </el-form>
-        </el-tab-pane>
 
-        <el-tab-pane label="Security & Keys" name="security">
-          <p class="text-muted">
-            Manage encryption keys and agent authentication keys.
-          </p>
-          <el-form label-position="top">
-            <el-form-item label="Master Encryption Key">
-              <el-input v-model="dummyKey" show-password disabled>
-                <template #append>
-                  <el-button>Rotate Key</el-button>
-                </template>
-              </el-input>
-            </el-form-item>
-          </el-form>
-        </el-tab-pane>
-      </el-tabs>
-    </el-card>
+            <div class="setting-control">
+              <el-input
+                v-if="item.type === 'text'"
+                v-model="rawSettings[item.key]"
+                @change="(val) => markDirty(item.key, val)"
+              />
+              <el-input-number
+                v-if="item.type === 'number'"
+                v-model="rawSettings[item.key]"
+                style="width: 150px"
+                @change="(val) => markDirty(item.key, val)"
+              />
+              <el-select
+                v-if="item.type === 'select'"
+                v-model="rawSettings[item.key]"
+                style="width: 100%"
+                @change="(val) => markDirty(item.key, val)"
+              >
+                <el-option
+                  v-for="opt in item.options"
+                  :key="opt"
+                  :label="opt"
+                  :value="opt"
+                />
+              </el-select>
+              <el-checkbox
+                v-if="item.type === 'boolean'"
+                v-model="rawSettings[item.key]"
+                @change="(val) => markDirty(item.key, val)"
+              >
+                Enable
+              </el-checkbox>
+            </div>
+          </div>
+        </div>
+
+        <transition name="el-fade-in">
+          <div v-if="isDirty" class="save-footer">
+            <span class="save-hint">You have unsaved changes</span>
+            <el-button type="primary" @click="saveSettings" :loading="saving"
+              >Save Settings</el-button
+            >
+          </div>
+        </transition>
+      </el-main>
+    </el-container>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from "vue";
-import { Refresh } from "@element-plus/icons-vue";
+import { ref, computed, onMounted } from "vue";
+import { Search } from "@element-plus/icons-vue";
 import apiClient from "@/api/axios";
 import { ElMessage } from "element-plus";
 
-const activeTab = ref("general");
 const loading = ref(false);
-const updating = ref(false);
-const dummyKey = ref("dlp_master_key_v1_secret_xxxxxxxx");
+const saving = ref(false);
+const isDirty = ref(false);
+const searchQuery = ref("");
+const activeCategory = ref("commonly");
 
-const settings = ref({
-  heartbeat_interval: 60,
-  log_retention_days: 30,
-  server_url: "",
-  alert_email: "",
+const rawSettings = ref({});
+
+const settingsSchema = [
+  {
+    id: "commonly",
+    title: "Commonly Used",
+    settings: [
+      {
+        key: "HEARTBEAT_INTERVAL_SECONDS",
+        label: "Heartbeat Interval",
+        description:
+          "Controls how often (in seconds) the agent check-in with the server.",
+        type: "number",
+      },
+      {
+        key: "LOG_RETENTION_DAYS",
+        label: "Log Retention Days",
+        description:
+          "Controls how many days of logs are retained on the agent.",
+        type: "number",
+      },
+      {
+        key: "AUTO_CLEAN_UP_LOG",
+        label: "Auto Clean Up Logs",
+        description:
+          "If enabled, the agent will automatically delete logs older than the retention period.",
+        type: "boolean",
+        options: [true, false],
+      },
+      // {
+      //   key: "log_level",
+      //   label: "Log Level",
+      //   description: "Defines the verbosity of the agent logs.",
+      //   type: "select",
+      //   options: ["info", "debug", "warning", "error"],
+      // },
+    ],
+  },
+  // {
+  //   id: "server",
+  //   title: "Server Config",
+  //   settings: [
+  //     {
+  //       key: "server_url",
+  //       label: "Server URL",
+  //       description: "The public endpoint URL that agents use to communicate.",
+  //       type: "text",
+  //     },
+  //     {
+  //       key: "maintenance_mode",
+  //       label: "Maintenance Mode",
+  //       description: "If enabled, agents will stop sending logs temporarily.",
+  //       type: "boolean",
+  //     },
+  //   ],
+  // },
+];
+const modifiedSettings = ref({});
+
+const filteredSchema = computed(() => {
+  if (!searchQuery.value) return settingsSchema;
+
+  const query = searchQuery.value.toLowerCase();
+  return settingsSchema
+    .map((cat) => ({
+      ...cat,
+      settings: cat.settings.filter(
+        (s) =>
+          s.label.toLowerCase().includes(query) ||
+          s.description.toLowerCase().includes(query),
+      ),
+    }))
+    .filter((cat) => cat.settings.length > 0);
 });
 
-const fetchSettings = async () => {
+const fetchData = async () => {
   loading.value = true;
   try {
     const res = await apiClient.get("/settings/settings");
-    settings.value = res.data;
+    rawSettings.value = res.data;
+    console.log("Fetched settings:", rawSettings.value);
+    isDirty.value = false;
   } finally {
     loading.value = false;
   }
 };
 
-const handleUpdate = async () => {
-  updating.value = true;
+const saveSettings = async () => {
+  if (Object.keys(modifiedSettings.value).length === 0) return;
+
+  saving.value = true;
+  console.log("Modified settings to save:", modifiedSettings);
+  // const payload = {
+  //   settings: {
+  //     HEARTBEAT_INTERVAL_SECONDS: Number(
+  //       rawSettings.value.HEARTBEAT_INTERVAL_SECONDS,
+  //     ),
+  //     LOG_RETENTION_DAYS: Number(rawSettings.value.LOG_RETENTION_DAYS),
+  //     AUTO_CLEAN_UP_LOG: Boolean(rawSettings.value.AUTO_CLEAN_UP_LOG),
+  //   },
+  // };
+  const payload = {
+    settings: {},
+  };
+
+  console.log("modified settings:", modifiedSettings.value);
+
+  for (const key in modifiedSettings.value) {
+    let value = modifiedSettings.value[key];
+    if (typeof value === "string") {
+      // Try to parse numbers and booleans
+      if (!isNaN(value)) {
+        value = Number(value);
+      } else if (value.toLowerCase() === "true") {
+        value = true;
+      } else if (value.toLowerCase() === "false") {
+        value = false;
+      }
+    }
+    payload.settings[key] = value;
+  }
+
+  console.log("Final payload to save:", payload);
+
   try {
-    // API: PATCH /api/v1/settings/settings
-    await apiClient.patch("/settings/settings", settings.value);
-    ElMessage.success("System settings updated successfully");
-    fetchSettings();
+    await apiClient.patch("/settings/settings", payload);
+    ElMessage.success("Settings saved successfully");
+    isDirty.value = false;
   } catch (error) {
-    ElMessage.error("Failed to update settings");
+    console.error("Error Detail:", error.response?.data);
+    ElMessage.error(error.response?.data?.detail[0]?.msg || "Update failed");
   } finally {
-    updating.value = false;
+    saving.value = false;
   }
 };
 
-onMounted(fetchSettings);
+const markDirty = (key, value) => {
+  modifiedSettings.value[key] = value;
+  isDirty.value = true;
+};
+
+const handleCategorySelect = (id) => {
+  const el = document.getElementById(`section-${id}`);
+  if (el) el.scrollIntoView({ behavior: "smooth" });
+};
+
+onMounted(fetchData);
 </script>
+
+<style scoped>
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 100px);
+  padding: 0 !important;
+}
+
+.settings-search-container {
+  padding: 20px 40px;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+}
+.search-input {
+  width: 100%;
+  max-width: 800px;
+}
+
+.settings-main-container {
+  flex: 1;
+  overflow: hidden;
+}
+
+.settings-sidebar {
+  background: #fff;
+  border-right: 1px solid #e2e8f0;
+}
+.settings-menu {
+  border-right: none;
+}
+
+.settings-content {
+  background: #fff;
+  padding: 20px 60px;
+  scroll-behavior: smooth;
+}
+
+.settings-section {
+  margin-bottom: 50px;
+}
+.section-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 30px;
+  color: #1e293b;
+}
+
+.setting-item {
+  margin-bottom: 30px;
+  max-width: 800px;
+  position: relative;
+  padding-left: 15px;
+}
+.setting-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+}
+.setting-item:hover::before {
+  background: var(--primary-color);
+}
+
+.setting-info {
+  margin-bottom: 10px;
+}
+.setting-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.label-bold {
+  font-weight: 700;
+  color: #1e293b;
+  font-size: 14px;
+}
+.setting-description {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-top: 4px;
+}
+
+.setting-control {
+  max-width: 400px;
+}
+
+.save-footer {
+  position: fixed;
+  bottom: 30px;
+  right: 60px;
+  background: #fff;
+  padding: 15px 25px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  z-index: 100;
+  border: 1px solid var(--primary-color);
+}
+.save-hint {
+  font-size: 13px;
+  color: var(--primary-color);
+  font-weight: 600;
+}
+</style>

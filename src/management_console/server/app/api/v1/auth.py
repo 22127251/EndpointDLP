@@ -6,15 +6,26 @@ from app.database import get_db
 from app.models.user import User
 from app.utils.security import verify_password, create_access_token
 
+
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+
 
 class LoginRequest(BaseModel):
     username: str
     password: str
-    
+
+class UserResponse(BaseModel):
+    id: str
+    username: str
+    full_name: str
+    role: str
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    user_info: UserResponse
+
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -37,9 +48,8 @@ async def login(
     access_token = create_access_token(
         data={
             "sub": str(user.id), 
-            "role": user.role, 
-            "username": user.username
+            "role": user.role
         }
     )
-    return TokenResponse(access_token=access_token)
+    return TokenResponse(access_token=access_token, user_info=UserResponse(id=str(user.id), username=user.username, full_name=user.full_name, role=user.role))
 
