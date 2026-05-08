@@ -4,11 +4,11 @@ from fastapi import Request
 
 async def add_audit_log(
     db: AsyncSession,
-    user_id: str,
-    username: str,
-    action: str,
-    target_type: str,
-    target_id: str = None,
+    user_id: str | None = None,
+    username: str | None = None,
+    action: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
     description: str = ""
 ):
 

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from app.database import get_db
 from app.models.user import User
 from app.utils.security import verify_password, create_access_token
-
+from app.services.audit_log_service import add_audit_log
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -40,6 +40,19 @@ async def login(
         not user.is_active or
         not verify_password(request.password, user.hashed_password) 
         ):
+
+        # audit log for failed login attempt
+        await add_audit_log(
+            db=db,
+            user_id=None,
+            username=request.username,
+            action="login",
+            target_type="user",
+            target_id=None,
+            description="Failed login attempt"
+        )
+        await db.commit()
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
@@ -51,5 +64,17 @@ async def login(
             "role": user.role
         }
     )
+
+    # audit log for successful login
+    await add_audit_log(
+        db=db,
+        user_id=user.id,
+        username=user.username,
+        action="login",
+        target_type="user",
+        target_id=str(user.id),
+        description="Successful login"
+    )
+    await db.commit()
     return TokenResponse(access_token=access_token, user_info=UserResponse(id=str(user.id), username=user.username, full_name=user.full_name, role=user.role))
 
