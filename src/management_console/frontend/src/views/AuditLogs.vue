@@ -8,11 +8,23 @@
         </p>
       </div>
       <div class="header-actions">
-        <el-button :icon="Refresh" @click="fetchLogs">Refresh</el-button>
+        <el-button :icon="Refresh" @click="fetchData">Refresh</el-button>
       </div>
     </div>
 
     <el-card shadow="never">
+      <!-- SEARCH BAR -->
+      <div class="toolbar">
+        <el-input
+          v-model="searchQuery"
+          placeholder="Search by action"
+          :prefix-icon="Search"
+          clearable
+          style="width: 350px"
+          @input="handleSearch"
+        />
+        <el-button :icon="Refresh" @click="fetchData">Reload</el-button>
+      </div>
       <el-table :data="logs" v-loading="loading" class="custom-table">
         <el-table-column label="TIMESTAMP" width="180">
           <template #default="{ row }">
@@ -69,7 +81,7 @@
           v-model:page-size="pageSize"
           :total="total"
           layout="total, prev, pager, next"
-          @current-change="fetchLogs"
+          @current-change="fetchData"
         />
       </div>
     </el-card>
@@ -78,7 +90,7 @@
 
 <script setup>
 import { ref, onMounted } from "vue";
-import { Refresh } from "@element-plus/icons-vue";
+import { Refresh, Search } from "@element-plus/icons-vue";
 import apiClient from "@/api/axios";
 
 const loading = ref(false);
@@ -87,7 +99,7 @@ const page = ref(1);
 const pageSize = ref(20);
 const total = ref(0);
 
-const fetchLogs = async () => {
+const fetchData = async () => {
   loading.value = true;
   try {
     const res = await apiClient.get("/audit-logs/", {
@@ -113,7 +125,7 @@ const formatTime = (timeStr) => {
   return new Date(timeStr).toLocaleString("en-GB");
 };
 
-onMounted(fetchLogs);
+onMounted(fetchData);
 </script>
 
 <style scoped>
@@ -152,5 +164,26 @@ onMounted(fetchLogs);
 :deep(.el-tag--dark.el-tag--info) {
   background-color: #3b82f6;
   border-color: #3b82f6;
+}
+.pagination-container {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 8px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.el-input__wrapper {
+  background-color: #ffffff !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--primary-color) inset !important;
 }
 </style>

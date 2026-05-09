@@ -7,9 +7,6 @@
           Monitor status and organize machines into security groups.
         </p>
       </div>
-      <!-- <el-button type="primary" :icon="Plus" @click="openRegisterDialog"
-        >Register Agent</el-button
-      > -->
     </div>
 
     <div class="header-actions">
@@ -28,6 +25,17 @@
 
     <!-- MAIN TABLE -->
     <el-card shadow="never">
+      <div class="toolbar">
+        <el-input
+          v-model="searchQuery"
+          placeholder="Search by name, ID or details..."
+          :prefix-icon="Search"
+          clearable
+          style="width: 350px"
+          @input="handleSearch"
+        />
+        <el-button :icon="Refresh" @click="fetchData">Reload</el-button>
+      </div>
       <el-table :data="agents" v-loading="loading" style="width: 100%">
         <el-table-column label="COMPUTER NAME" min-width="200">
           <template #default="{ row }">
@@ -95,6 +103,18 @@
           </template>
         </el-table-column>
       </el-table>
+      <!-- PAGINATION -->
+      <div class="pagination-container">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          @size-change="fetchData"
+          @current-change="fetchData"
+        />
+      </div>
     </el-card>
 
     <!-- DIALOG: REGISTER NEW AGENT -->
@@ -199,6 +219,8 @@ import {
   Document,
   Download,
   ArrowDown,
+  Search,
+  Refresh,
 } from "@element-plus/icons-vue";
 import apiClient from "@/api/axios";
 import { exportData } from "@/utils/exporter";
@@ -208,6 +230,10 @@ const loading = ref(false);
 const submitting = ref(false);
 const agents = ref([]);
 const groups = ref([]);
+const page = ref(1);
+const pageSize = ref(20);
+const total = ref(0);
+const searchQuery = ref("");
 
 // Edit Logic
 const editVisible = ref(false);
@@ -218,19 +244,36 @@ const groupVisible = ref(false);
 const activeAgent = ref(null);
 const targetGroupId = ref("");
 
+let searchTimer = null;
+
 const fetchData = async () => {
   loading.value = true;
   try {
     const [aRes, gRes] = await Promise.all([
-      apiClient.get("/agents/"),
+      apiClient.get("/agents/", {
+        params: {
+          page: page.value,
+          page_size: pageSize.value,
+          search: searchQuery.value,
+        },
+      }),
       apiClient.get("/agent-groups/"),
     ]);
     // OpenAPI typically wraps list data in .items
     agents.value = aRes.data.items || aRes.data;
     groups.value = gRes.data.items || gRes.data;
+    total.value = aRes.data.total || 0;
   } finally {
     loading.value = false;
   }
+};
+
+const handleSearch = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    page.value = 1;
+    fetchData();
+  }, 500);
 };
 
 const getStatusType = (status) => {
@@ -373,5 +416,26 @@ onMounted(fetchData);
 .assign-info {
   font-size: 14px;
   color: #64748b;
+}
+.pagination-container {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 8px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.el-input__wrapper {
+  background-color: #ffffff !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--primary-color) inset !important;
 }
 </style>

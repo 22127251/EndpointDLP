@@ -1,7 +1,7 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from pydantic import BaseModel
 from app.database import get_db
 from app.models.agent_group import AgentGroup
@@ -19,6 +19,7 @@ router = APIRouter(prefix="/agent-groups", tags=["Agent Groups"])
 async def list_agent_groups(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    search : str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -29,6 +30,14 @@ async def list_agent_groups(
         .limit(page_size)
     )
 
+    total_query = select(func.count(AgentGroup.id))
+    if search:
+        query = query.where(AgentGroup.name.ilike(f"%{search}%"))
+
+        total_query = total_query.where(AgentGroup.name.ilike(f"%{search}%"))
+
+    total_result = await db.execute(total_query)
+    total = total_result.scalar()
     result = await db.execute(query)
     groups = result.scalars().all()
 
@@ -42,7 +51,7 @@ async def list_agent_groups(
         "items": items,
         "page": page, 
         "page_size": page_size,
-        "total": len(items)
+        "total": total
     }
 
 

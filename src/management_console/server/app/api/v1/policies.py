@@ -1,7 +1,7 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.policy import Policy
@@ -19,16 +19,21 @@ router = APIRouter(prefix="/policies", tags=["Policies"])
 async def list_policies(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    is_active: bool | None = None,
+    search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    
+    
     query = select(Policy)
 
-    if is_active is not None:
-        query = query.where(Policy.is_active == is_active)
-    
-
+    total_query = select(func.count(Policy.id))
+    if search:
+        query = query.where(Policy.name.ilike(f"%{search}%"))
+        total_query = total_query.where(Policy.name.ilike(f"%{search}%"))
+        
+    total_result = await db.execute(total_query)
+    total = total_result.scalar()
     # pagination
     query = query.order_by(Policy.created_at.desc())
     query = query.offset((page - 1) * page_size).limit(page_size)
@@ -39,7 +44,7 @@ async def list_policies(
         "items": [PolicyResponse.model_validate(p) for p in policies],
         "page": page,
         "page_size": page_size,
-        "total": len(policies)
+        "total": total
     }
 
 

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db, Base
 from app.models.user import User
@@ -17,17 +17,25 @@ async def list_users(
     db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None),
     current_admin: User = Depends(is_admin_user)
 ):
     
-    query = select(User).offset((page - 1) * page_size).limit(page_size)
+    query = select(User)
+    total_query = select(func.count(User.id))
+    if search:
+        query = query.filter(User.username.ilike(f"%{search}%"))
+        total_query = total_query.filter(User.username.ilike(f"%{search}%"))
+    query = query.offset((page - 1) * page_size).limit(page_size)
+    total = await db.execute(total_query)
+    total_count = total.scalar()
     result = await db.execute(query)
     users = result.scalars().all()
     return {
-        "items": users,
+        "items": [UserResponse.model_validate(u) for u in users],
         "page": page,
         "page_size": page_size,
-        "total": len(users)
+        "total": total_count
     }
 
 

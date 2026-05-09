@@ -22,9 +22,24 @@
         </template>
       </el-dropdown>
     </div>
+
     <!-- TABLE -->
 
     <el-card shadow="never">
+      <!-- SEARCH BAR -->
+      <div class="toolbar">
+        <el-input
+          v-model="searchQuery"
+          placeholder="Search by name"
+          :prefix-icon="Search"
+          clearable
+          style="width: 350px"
+          @input="handleSearch"
+        />
+        <el-button :icon="Refresh" @click="fetchData">Reload</el-button>
+      </div>
+
+      <!-- POLICY TABLE -->
       <el-table :data="policies" v-loading="loading">
         <el-table-column prop="name" label="POLICY NAME" min-width="220" />
         <el-table-column label="CHANNEL" width="120">
@@ -75,6 +90,19 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- PAGINATION -->
+      <div class="pagination-container">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          @size-change="fetchData"
+          @current-change="fetchData"
+        />
+      </div>
     </el-card>
 
     <!-- CREATE/EDIT DIALOG -->
@@ -176,6 +204,8 @@ import {
   Delete,
   Download,
   Document,
+  Search,
+  Refresh,
 } from "@element-plus/icons-vue";
 import apiClient from "@/api/axios";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -186,6 +216,10 @@ const submitting = ref(false);
 const dialogVisible = ref(false);
 const isEdit = ref(false);
 const policies = ref([]);
+const page = ref(1);
+const pageSize = ref(20);
+const total = ref(0);
+const searchQuery = ref("");
 
 const handleExport = (format) => {
   const dataToExport = policies.value;
@@ -215,15 +249,24 @@ const removeRuleRow = (index) => {
   ruleRows.value.splice(index, 1);
 };
 
+let searchTimer = null;
+
 const fetchData = async () => {
   loading.value = true;
   try {
     const [pRes, mRes] = await Promise.all([
-      apiClient.get("/policies/"),
+      apiClient.get("/policies/", {
+        params: {
+          page: page.value,
+          page_size: pageSize.value,
+          search: searchQuery.value,
+        },
+      }),
       apiClient.get("/metadata/constants"),
     ]);
 
     policies.value = pRes.data.items || pRes.data;
+    total.value = pRes.data.total || 0;
     constants.value = {
       actions: mRes.data.policy_actions || [],
       channels: mRes.data.policy_channels || [],
@@ -232,6 +275,14 @@ const fetchData = async () => {
   } finally {
     loading.value = false;
   }
+};
+
+const handleSearch = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    page.value = 1;
+    fetchData();
+  }, 500);
 };
 
 const prepareRuleToRows = (ruleObj) => {
@@ -348,5 +399,26 @@ const getActionType = (action) => {
 }
 .mt-4 {
   margin-top: 16px;
+}
+.pagination-container {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 8px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.el-input__wrapper {
+  background-color: #ffffff !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--primary-color) inset !important;
 }
 </style>

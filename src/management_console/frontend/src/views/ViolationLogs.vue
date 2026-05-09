@@ -22,6 +22,19 @@
     </div>
 
     <el-card shadow="never">
+      <!-- SEARCH BAR -->
+      <div class="toolbar">
+        <el-input
+          v-model="searchQuery"
+          placeholder="Search by action"
+          :prefix-icon="Search"
+          clearable
+          style="width: 350px"
+          @input="handleSearch"
+        />
+        <el-button :icon="Refresh" @click="fetchData">Reload</el-button>
+      </div>
+
       <el-table :data="logs" v-loading="loading" class="custom-table">
         <el-table-column prop="timestamp" label="TIME" width="180">
           <template #default="{ row }">
@@ -76,13 +89,13 @@
       <!-- Pagination -->
       <div class="pagination-container">
         <el-pagination
-          v-model:current-page="currentPage"
+          v-model:current-page="page"
           v-model:page-size="pageSize"
           :page-sizes="[10, 20, 50, 100]"
           layout="total, sizes, prev, pager, next"
-          :total="totalLogs"
-          @size-change="fetchLogs"
-          @current-change="fetchLogs"
+          :total="total"
+          @size-change="fetchData"
+          @current-change="fetchData"
         />
       </div>
     </el-card>
@@ -111,31 +124,39 @@
 
 <script setup>
 import { ref, onMounted } from "vue";
-import { Download, View } from "@element-plus/icons-vue";
+import { Download, View, Search, Refresh } from "@element-plus/icons-vue";
 import apiClient from "@/api/axios";
 import { exportData } from "@/utils/exporter";
 
 const loading = ref(false);
 const logs = ref([]);
-const totalLogs = ref(0);
-const currentPage = ref(1);
+const total = ref(0);
+const page = ref(1);
 const pageSize = ref(20);
 
 const detailVisible = ref(false);
 const selectedLog = ref(null);
+const searchQuery = ref("");
 
-const fetchLogs = async () => {
+let searchTimer = null;
+const handleSearch = () => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    fetchData();
+  }, 500);
+};
+const fetchData = async () => {
   loading.value = true;
   try {
     const res = await apiClient.get("/violation-logs/", {
       params: {
-        page: currentPage.value,
+        page: page.value,
         page_size: pageSize.value,
+        search: searchQuery.value,
       },
     });
-    // Gi? s? API tr? v? { items: [], total: 100 }
     logs.value = res.data.items || [];
-    totalLogs.value = res.data.total || 0;
+    total.value = res.data.total || 0;
   } finally {
     loading.value = false;
   }
@@ -147,10 +168,10 @@ const viewDetail = (row) => {
 };
 
 const handleExport = (fmt) => {
-  exportData(logs.value, `violation_logs_p${currentPage.value}`, fmt);
+  exportData(logs.value, `violation_logs_p${page.value}`, fmt);
 };
 
-onMounted(fetchLogs);
+onMounted(fetchData);
 </script>
 
 <style scoped>
@@ -187,5 +208,26 @@ onMounted(fetchLogs);
   overflow-x: auto;
   font-family: monospace;
   font-size: 12px;
+}
+.pagination-container {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 8px;
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.el-input__wrapper {
+  background-color: #ffffff !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--primary-color) inset !important;
 }
 </style>

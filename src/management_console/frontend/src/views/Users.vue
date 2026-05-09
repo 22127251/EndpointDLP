@@ -11,6 +11,18 @@
     </div>
 
     <el-card shadow="never">
+      <!-- SEARCH BAR -->
+      <div class="toolbar">
+        <el-input
+          v-model="searchQuery"
+          placeholder="Search by name"
+          :prefix-icon="Search"
+          clearable
+          style="width: 350px"
+          @input="handleSearch"
+        />
+        <el-button :icon="Refresh" @click="fetchData">Reload</el-button>
+      </div>
       <el-table :data="users" v-loading="loading">
         <el-table-column prop="username" label="USERNAME" font-weight="bold" />
         <el-table-column prop="full_name" label="FULL NAME" />
@@ -34,6 +46,19 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- PAGINATION -->
+      <div class="pagination-container">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          @size-change="fetchData"
+          @current-change="fetchData"
+        />
+      </div>
     </el-card>
 
     <!-- USER DIALOG (Create/Edit) -->
@@ -72,7 +97,7 @@
 
 <script setup>
 import { ref, onMounted } from "vue";
-import { Plus, Edit, Delete } from "@element-plus/icons-vue";
+import { Plus, Edit, Delete, Search, Refresh } from "@element-plus/icons-vue";
 import apiClient from "@/api/axios";
 import { ElMessage, ElMessageBox } from "element-plus";
 
@@ -88,14 +113,36 @@ const userForm = ref({
   role: "user",
 });
 
-const fetchUsers = async () => {
+const page = ref(1);
+const pageSize = ref(20);
+const total = ref(0);
+const searchQuery = ref("");
+
+let searchTimer = null;
+
+const fetchData = async () => {
   loading.value = true;
   try {
-    const res = await apiClient.get("/users/");
+    const res = await apiClient.get("/users/", {
+      params: {
+        page: page.value,
+        page_size: pageSize.value,
+        search: searchQuery.value,
+      },
+    });
     users.value = res.data.items || res.data;
+    total.value = res.data.total || 0;
   } finally {
     loading.value = false;
   }
+};
+
+const handleSearch = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    page.value = 1;
+    fetchData();
+  }, 500);
 };
 
 const openCreateDialog = () => {
@@ -126,7 +173,7 @@ const submitForm = async () => {
       ElMessage.success("User created");
     }
     dialogVisible.value = false;
-    fetchUsers();
+    fetchData();
   } catch (e) {
     ElMessage.error("Action failed");
   }
@@ -135,9 +182,34 @@ const submitForm = async () => {
 const handleDelete = (id) => {
   ElMessageBox.confirm("Delete this user?").then(async () => {
     await apiClient.delete(`/users/${id}`);
-    fetchUsers();
+    fetchData();
   });
 };
 
-onMounted(fetchUsers);
+onMounted(fetchData);
 </script>
+
+<style scoped>
+.pagination-container {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 8px;
+}
+
+/* Làm cho Search Bar trông gi?ng VS Code hõn */
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.el-input__wrapper {
+  background-color: #ffffff !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--primary-color) inset !important;
+}
+</style>

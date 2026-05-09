@@ -24,38 +24,63 @@
         </template>
       </el-dropdown>
     </div>
+    <el-card shadow="never">
+      <div class="toolbar">
+        <el-input
+          v-model="searchQuery"
+          placeholder="Search by name, ID or details..."
+          :prefix-icon="Search"
+          clearable
+          style="width: 350px"
+          @input="handleSearch"
+        />
+        <el-button :icon="Refresh" @click="fetchData">Reload</el-button>
+      </div>
 
-    <!-- GROUP LIST -->
-    <el-table :data="groups" v-loading="loading">
-      <el-table-column prop="name" label="GROUP NAME" min-width="200" />
-      <el-table-column prop="member_count" label="AGENTS" width="120" />
-      <el-table-column label="MANAGE" width="180" align="right">
-        <template #default="{ row }">
-          <el-dropdown
-            @command="(format) => exportData(row, `group_${row.id}`, format)"
-          >
-            <el-button link :icon="Document" />
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="json">JSON</el-dropdown-item>
-                <el-dropdown-item command="yaml">YAML</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+      <!-- GROUP LIST -->
+      <el-table :data="groups" v-loading="loading">
+        <el-table-column prop="name" label="GROUP NAME" min-width="200" />
+        <el-table-column prop="member_count" label="AGENTS" width="120" />
+        <el-table-column label="MANAGE" width="180" align="right">
+          <template #default="{ row }">
+            <el-dropdown
+              @command="(format) => exportData(row, `group_${row.id}`, format)"
+            >
+              <el-button link :icon="Document" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="json">JSON</el-dropdown-item>
+                  <el-dropdown-item command="yaml">YAML</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
 
-          <el-button link :icon="Setting" @click="openGroupDialog(row)"
-            >Manage</el-button
-          >
+            <el-button link :icon="Setting" @click="openGroupDialog(row)"
+              >Manage</el-button
+            >
 
-          <el-button
-            link
-            type="danger"
-            :icon="Delete"
-            @click="handleDelete(row.id)"
-          />
-        </template>
-      </el-table-column>
-    </el-table>
+            <el-button
+              link
+              type="danger"
+              :icon="Delete"
+              @click="handleDelete(row.id)"
+            />
+          </template>
+        </el-table-column>
+      </el-table>
+      <!-- PAGINATION -->
+      <div class="pagination-container">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="pageSize"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next"
+          :total="total"
+          @size-change="fetchData"
+          @current-change="fetchData"
+        />
+      </div>
+    </el-card>
 
     <!-- DIALOG: MANAGE GROUP (SETTINGS + MEMBERS) -->
     <el-dialog
@@ -201,6 +226,9 @@ import {
   Download,
   Document,
   ArrowDown,
+  Search,
+  Refresh,
+  Link,
 } from "@element-plus/icons-vue";
 import apiClient from "@/api/axios";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -225,23 +253,40 @@ const form = ref({
   agents: [],
   policies: [],
 });
+const page = ref(1);
+const pageSize = ref(20);
+const total = ref(0);
+const searchQuery = ref("");
+
+let searchTimer = null;
 
 const fetchData = async () => {
   loading.value = true;
   try {
     const [gRes, aRes, pRes] = await Promise.all([
-      apiClient.get("/agent-groups/"),
+      apiClient.get(
+        `/agent-groups/?page=${page.value}&page_size=${pageSize.value}&search=${searchQuery.value}`,
+      ),
       apiClient.get("/agents/"),
       apiClient.get("/policies/"),
     ]);
     groups.value = gRes.data.items || gRes.data;
     availablePolicies.value = pRes.data.items || pRes.data;
+    total.value = gRes.data.total || 0;
 
     const allAgents = aRes.data.items || aRes.data;
     unassignedAgents.value = allAgents.filter((a) => !a.group_id);
   } finally {
     loading.value = false;
   }
+};
+
+const handleSearch = () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    page.value = 1;
+    fetchData();
+  }, 500);
 };
 
 const handleAssignPolicies = async () => {
@@ -386,5 +431,27 @@ const getActionType = (action) => {
 :deep(.el-tabs--border-card) {
   border: none;
   box-shadow: none;
+}
+.pagination-container {
+  margin-top: 24px;
+  display: flex;
+  justify-content: flex-end;
+  padding-bottom: 8px;
+}
+
+/* Làm cho Search Bar trông gi?ng VS Code hõn */
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.el-input__wrapper {
+  background-color: #ffffff !important;
+  box-shadow: 0 0 0 1px #e2e8f0 inset !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--primary-color) inset !important;
 }
 </style>

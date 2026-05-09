@@ -3,7 +3,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.agent import Agent, AgentStatus
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/agents", tags=["Agents"])
 async def list_agents(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    status: AgentStatus | None = None,
+    search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -34,9 +34,15 @@ async def list_agents(
         )
     )
 
-    if status:
-        query = query.where(Agent.status == status)
-    
+    total_agent_query = select(func.count(Agent.id))
+
+    if search:
+        query = query.where(Agent.hostname.ilike(f"%{search}%"))
+        total_agent_query = total_agent_query.where(Agent.hostname.ilike(f"%{search}%"))
+        
+    total_agent_result = await db.execute(total_agent_query)
+    total_agent = total_agent_result.scalar()
+
     # pagination
     query = query.offset((page - 1) * page_size).limit(page_size)
 
@@ -66,7 +72,7 @@ async def list_agents(
         "items": [AgentResponse.model_validate(a) for a in agents],
         "page": page,
         "page_size": page_size,
-        "total": len(items)
+        "total": total_agent
     }
 
 
