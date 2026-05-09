@@ -38,14 +38,19 @@
         <template v-if="auth.isAdmin">
           <div class="sidebar-group-label admin-label">ADMINISTRATION</div>
 
+          <el-menu-item index="/users">
+            <el-icon><User /></el-icon>
+            <span>User Management</span>
+          </el-menu-item>
+
           <el-menu-item index="/violation-log">
             <el-icon><Warning /></el-icon>
             <span>Violation Logs</span>
           </el-menu-item>
 
-          <el-menu-item index="/users">
-            <el-icon><User /></el-icon>
-            <span>User Management</span>
+          <el-menu-item index="/audit-logs">
+            <el-icon><Checked /></el-icon>
+            <span>Audit Logs</span>
           </el-menu-item>
         </template>
       </el-menu>
