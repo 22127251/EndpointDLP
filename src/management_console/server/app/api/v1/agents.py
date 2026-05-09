@@ -66,6 +66,7 @@ async def list_agents(
         "items": [AgentResponse.model_validate(a) for a in agents],
         "page": page,
         "page_size": page_size,
+        "total": len(items)
     }
 
 
@@ -241,7 +242,6 @@ async def update_agent(
     update_agent = agent_data.model_dump(exclude_unset=True)
 
     if "group_id" in update_agent and update_agent["group_id"] is not None:
-        # Verify group exists
         result = await db.execute(select(AgentGroup).where(AgentGroup.id == update_agent["group_id"]))
         group = result.scalar_one_or_none()
         if not group:

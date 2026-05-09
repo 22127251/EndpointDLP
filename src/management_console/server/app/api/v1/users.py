@@ -12,7 +12,7 @@ from app.services.audit_log_service import add_audit_log
 router = APIRouter(prefix="/users", tags=["Users"], dependencies=[Depends(get_current_user)])
 
 
-@router.get("/", response_model=list[UserResponse])
+@router.get("/", response_model=dict)
 async def list_users(
     db: AsyncSession = Depends(get_db),
     page: int = Query(1, ge=1),
@@ -23,7 +23,12 @@ async def list_users(
     query = select(User).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(query)
     users = result.scalars().all()
-    return users
+    return {
+        "items": users,
+        "page": page,
+        "page_size": page_size,
+        "total": len(users)
+    }
 
 
 @router.get("/{user_id}", response_model=UserResponse)

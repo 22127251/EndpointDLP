@@ -51,5 +51,6 @@ async def list_logs(
     return {
         "items": logs,
         "page": page,
-        "page_size": page_size
+        "page_size": page_size,
+        "total": len(logs)
     }

@@ -39,6 +39,7 @@ async def list_policies(
         "items": [PolicyResponse.model_validate(p) for p in policies],
         "page": page,
         "page_size": page_size,
+        "total": len(policies)
     }
 
 

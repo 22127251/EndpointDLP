@@ -41,7 +41,8 @@ async def list_agent_groups(
     return {
         "items": items,
         "page": page, 
-        "page_size": page_size
+        "page_size": page_size,
+        "total": len(items)
     }
 
 

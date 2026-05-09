@@ -32,5 +32,6 @@ async def list_audit_logs(
     return {
         "items": [AuditLogResponse.model_validate(log) for log in logs], 
         "page": page, 
-        "page_size": page_size
+        "page_size": page_size,
+        "total": len(logs)
     }
