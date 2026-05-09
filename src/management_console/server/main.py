@@ -6,6 +6,8 @@ from app.api.v1.router import api_router
 from app.config import get_settings
 import asyncio
 from app.services.heartbeat_service import offline_checker_loop
+from app.services.seed import create_first_admin, create_init_settings
+from app.database import async_session_maker
 
 settings = get_settings()
 
@@ -14,6 +16,13 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     # Startup
     print("DLP Management Console is starting...")
+    
+    print("Checking for initial admin user...")
+    # Create the initial admin user
+    async with async_session_maker() as db:
+        await create_first_admin(db)
+        await create_init_settings(db)
+
     print("Heartbeat service is starting...")
 
     # Start the offline checker loop
