@@ -39,8 +39,8 @@ async def create_init_settings(db: AsyncSession):
             settings={
                 "HEARTBEAT_INTERVAL_SECONDS": settings.HEARTBEAT_INTERVAL_SECONDS,
                 "OFFLINE_SCAN_INTERVAL_SECONDS": settings.OFFLINE_SCAN_INTERVAL_SECONDS,
-                "AUTO_CLEAN_UP_LOG": settings.AUTO_CLEAN_UP_LOG,
-                "LOG_RETENTION_DAYS": settings.LOG_RETENTION_DAYS
+                "AUTO_CLEAN_UP_VIOLATION_LOG": settings.AUTO_CLEAN_UP_VIOLATION_LOG,
+                "VIOLATION_LOG_RETENTION_DAYS": settings.VIOLATION_LOG_RETENTION_DAYS
             }
         )
         db.add(new_settings)

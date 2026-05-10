@@ -8,7 +8,7 @@ class ServerConfigurationUpdate(BaseModel):
         ...,
         examples=[
             {
-                "LOG_RETENTION_DAYS": 90,
+                "VIOLATION_LOG_RETENTION_DAYS": 90,
                 "HEARTBEAT_INTERVAL_SECONDS": 60
             }
         ]

@@ -8,6 +8,6 @@ class ServerConfiguration(Base):
     
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     settings: Mapped[dict] = mapped_column(JSONB, default={
-        "LOG_RETENTION_DAYS": 90,
+        "VIOLATION_LOG_RETENTION_DAYS": 90,
         "HEARTBEAT_INTERVAL_SECONDS": 60,
     })

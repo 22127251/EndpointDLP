@@ -18,8 +18,8 @@ async def run_log_cleanup():
                 print("[LogCleanup] There is no configuration for log cleanup. Skipping.")
                 return
 
-            is_enabled = config.settings.get("AUTO_CLEAN_UP_LOG", False)
-            retention_days = config.settings.get("LOG_RETENTION_DAYS", 90)
+            is_enabled = config.settings.get("AUTO_CLEAN_UP_VIOLATION_LOG", False)
+            retention_days = config.settings.get("VIOLATION_LOG_RETENTION_DAYS", 90)
 
             if not is_enabled:
                 print("[LogCleanup] Auto log cleanup is disabled. Skipping.")

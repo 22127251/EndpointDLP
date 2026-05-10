@@ -135,7 +135,7 @@ const settingsSchema = [
     title: "Log Settings",
     settings: [
       {
-        key: "AUTO_CLEAN_UP_LOG",
+        key: "AUTO_CLEAN_UP_VIOLATION_LOG",
         label: "Auto Clean Up Logs",
         description:
           "If enabled, the agent will automatically delete logs older than the retention period.",
@@ -143,7 +143,7 @@ const settingsSchema = [
         options: [true, false],
       },
       {
-        key: "LOG_RETENTION_DAYS",
+        key: "VIOLATION_LOG_RETENTION_DAYS",
         label: "Log Retention Days",
         description:
           "Controls how many days of logs are retained on the agent.",

@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -19,7 +20,9 @@ class Settings(BaseSettings):
     MAX_PAGE_SIZE: int = 100
 
     # CORS
-    CORS_ORIGINS: list[str] = ["*"]
+    CORS_ORIGINS: list[str] = Field(
+        default=[]
+    )
 
     # JWT Auth
     SECRET_KEY: str
@@ -30,8 +33,8 @@ class Settings(BaseSettings):
     # server settings
     HEARTBEAT_INTERVAL_SECONDS: int = 60
     OFFLINE_SCAN_INTERVAL_SECONDS: int = 60
-    AUTO_CLEAN_UP_LOG: bool = False
-    LOG_RETENTION_DAYS: int = 30
+    AUTO_CLEAN_UP_VIOLATION_LOG: bool = False
+    VIOLATION_LOG_RETENTION_DAYS: int = 30
 
     class Config:
         env_file = ".env"
