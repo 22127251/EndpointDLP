@@ -439,7 +439,6 @@ const getActionType = (action) => {
   padding-bottom: 8px;
 }
 
-/* Làm cho Search Bar trông gi?ng VS Code hõn */
 .toolbar {
   display: flex;
   justify-content: space-between;

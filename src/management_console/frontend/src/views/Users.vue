@@ -82,8 +82,9 @@
         </el-form-item>
         <el-form-item label="Role">
           <el-select v-model="userForm.role" style="width: 100%">
-            <el-option label="Admin" value="admin" />
-            <el-option label="User" value="user" />
+            <el-option label="admin" value="admin" />
+            <el-option label="viewer" value="viewer" />
+            <el-option label="operator" value="operator" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -152,7 +153,7 @@ const openCreateDialog = () => {
     password: "",
     full_name: "",
     email: "",
-    role: "user",
+    role: "viewer",
   };
   dialogVisible.value = true;
 };
@@ -197,7 +198,6 @@ onMounted(fetchData);
   padding-bottom: 8px;
 }
 
-/* Làm cho Search Bar trông gi?ng VS Code hõn */
 .toolbar {
   display: flex;
   justify-content: space-between;
