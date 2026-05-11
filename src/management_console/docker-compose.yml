@@ -17,8 +17,6 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
-      tags:
-        - latest
     container_name: dlp_backend_container
     restart: always
     depends_on:
@@ -29,6 +27,20 @@ services:
       - ./server/.env
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:22127475@db:5432/dlpserver
+    # networks:
+    #   - dlp_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+    container_name: dlp_frontend_container
+    restart: always
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
     # networks:
     #   - dlp_network
 
