@@ -3,7 +3,7 @@ policies:
   # --- Chặn đưa thẻ VISA vào Browser ---
   - id: block_visa_browser
     name: Block Visa Card in Browser
-    channels: [browser, clipboard]
+    channels: [browser, clipboard, peripheral_storage]
     action: block
     type: regex
     patterns:
@@ -20,7 +20,7 @@ policies:
   # --- Chặn đưa CCCD vào Browser ---
   - id: block_cccd_browser
     name: Block Vietnamese Citizen ID (CCCD) in Browser
-    channels: [browser, clipboard]
+    channels: [browser, clipboard, peripheral_storage]
     action: block
     type: regex
     patterns:
@@ -36,22 +36,22 @@ policies:
       - "định danh cá nhân"
     context_range: 200
 
-  # --- Chặn từ khóa liên quan đến Bí mật / Nội bộ vào Browser ---
-  - id: block_confidential_keywords_browser
-    name: Block Confidential Keywords in Browser
-    channels: [browser, clipboard]
-    action: block
-    type: denylist
-    keywords:
-      - "mật"
-      - "bí mật"
-      - "tuyệt mật"
-      - "nội bộ"
-      - "confidential"
-      - "top secret"
-      - "strictly confidential"
-    context_words: []
-    context_range: 0
+  # # --- Chặn từ khóa liên quan đến Bí mật / Nội bộ vào Browser ---
+  # - id: block_confidential_keywords_browser
+  #   name: Block Confidential Keywords in Browser
+  #   channels: [browser, clipboard]
+  #   action: block
+  #   type: denylist
+  #   keywords:
+  #     - "mật"
+  #     - "bí mật"
+  #     - "tuyệt mật"
+  #     - "nội bộ"
+  #     - "confidential"
+  #     - "top secret"
+  #     - "strictly confidential"
+  #   context_words: []
+  #   context_range: 0
 
   # --- Cho phép và Ghi Log (Allow & Log) Số điện thoại vào Browser ---
   - id: log_phone_numbers_browser

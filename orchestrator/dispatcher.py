@@ -24,6 +24,9 @@ class Dispatcher:
         self._browser_pool = ThreadPoolExecutor(
             max_workers=cfg.browser_workers, thread_name_prefix="dlp-browser"
         )
+        self._peripheral_pool = ThreadPoolExecutor(
+            max_workers=cfg.peripheral_storage_workers, thread_name_prefix="dlp-periph"
+        )
 
         self._clip_seq: int = 0
         self._clip_lock = threading.Lock()
@@ -43,11 +46,14 @@ class Dispatcher:
         channel = request.get("channel", "browser")
         if channel == "clipboard":
             return self._analyze_clipboard(request)
+        if channel == "peripheral_storage":
+            return self._analyze_peripheral(request), True
         return self._analyze_browser(request), True
 
     def shutdown(self, wait: bool = True) -> None:
         self._clipboard_pool.shutdown(wait=wait)
         self._browser_pool.shutdown(wait=wait)
+        self._peripheral_pool.shutdown(wait=wait)
 
     # ------------------------------------------------------------------ #
 
@@ -71,6 +77,28 @@ class Dispatcher:
             return "BLOCK"
         except Exception as exc:
             log.error("error req=%s channel=browser: %s", req_id, exc)
+            return "BLOCK"
+
+    def _analyze_peripheral(self, request: dict) -> str:
+        req_id = request.get("req_id", "?")
+        future = self._peripheral_pool.submit(
+            self._pm.analyze,
+            request["channel"],
+            request["kind"],
+            text=request.get("text"),
+            file_path=request.get("file_path"),
+            req_id=req_id,
+        )
+        try:
+            decision, _violations = future.result(timeout=_ANALYSIS_TIMEOUT)
+            return decision
+        except FutureTimeoutError:
+            log.error("timeout req=%s channel=peripheral_storage after %.1fs; failing closed",
+                      req_id, _ANALYSIS_TIMEOUT)
+            future.cancel()
+            return "BLOCK"
+        except Exception as exc:
+            log.error("error req=%s channel=peripheral_storage: %s", req_id, exc)
             return "BLOCK"
 
     def _analyze_clipboard(self, request: dict) -> tuple[str, bool]:

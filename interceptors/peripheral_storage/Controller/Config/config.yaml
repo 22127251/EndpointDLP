@@ -1,0 +1,10 @@
+target_processes:
+  - explorer.exe
+
+# Behavior when shared memory is unavailable or cannot be read inside the hook.
+# "open"   (default) — allow the file operation through
+# "closed" — block all removable-drive writes when unsure
+fail_mode: open
+
+shared_memory_name: UsbDlpDriveMap
+payload_dll_path: Payload.dll

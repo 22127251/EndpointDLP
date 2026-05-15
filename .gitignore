@@ -790,3 +790,7 @@ _NCrunch*
 
 #claude
 .claude/
+
+#vcpkg
+vcpkg_installed/
+vcpkg-configuration.json

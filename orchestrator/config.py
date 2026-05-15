@@ -12,6 +12,7 @@ class OrchestratorConfig:
     ctl_pipe: str
     clipboard_workers: int
     browser_workers: int
+    peripheral_storage_workers: int
     pipe_listeners: int
     max_clipboard_bytes: int
     max_file_bytes: int
@@ -44,6 +45,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         ctl_pipe=raw["ctl_pipe"],
         clipboard_workers=pools.get("clipboard_workers", 2),
         browser_workers=pools.get("browser_workers", 3),
+        peripheral_storage_workers=pools.get("peripheral_storage_workers", 2),
         pipe_listeners=pools.get("pipe_listeners", 4),
         max_clipboard_bytes=limits.get("max_clipboard_bytes", 1048576),
         max_file_bytes=limits.get("max_file_bytes", 104857600),
