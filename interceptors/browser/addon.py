@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from email.parser import BytesHeaderParser
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 from mitmproxy import http
 
@@ -42,7 +42,7 @@ _BLOCK_CACHE_TTL = 60.0                 # seconds
 
 def load(loader):
     global _cfg
-    _cfg = load_config("config.yaml")
+    _cfg = load_config(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml"))
     tmp = _cfg.resolved_temp_dir()
     try:
         os.makedirs(tmp, exist_ok=True)
@@ -81,6 +81,19 @@ def requestheaders(flow: http.HTTPFlow) -> None:
         flow.request.stream = False
         return
 
+    # Gmail attachment uploads — always buffer multipart/form-data to Gmail hosts
+    host = flow.request.pretty_host.lower()
+    if any(host == h or host.endswith("." + h) for h in _GMAIL_HOSTS):
+        if "multipart/form-data" in content_type:
+            log.debug("Force-buffering Gmail upload %s %s", flow.request.method, flow.request.pretty_url)
+            flow.request.stream = False
+            return
+        # Gmail resumable upload initiation or file upload to /_/upload
+        if "/_/upload" in flow.request.path.lower():
+            log.debug("Force-buffering Gmail resumable upload %s %s", flow.request.method, flow.request.pretty_url)
+            flow.request.stream = False
+            return
+
     # For other types buffer if URL contains an upload keyword
     if any(kw in flow.request.path.lower() for kw in _cfg.upload_url_keywords):
         log.debug("Force-buffering %s %s (url keyword match)", flow.request.method, flow.request.pretty_url)
@@ -95,6 +108,21 @@ def request(flow: http.HTTPFlow) -> None:
             and "batch" in flow.request.path.lower()):
         _track_resumable_initiation_batch(flow)
         return  # Not itself a file upload — just the initiation envelope
+
+    # Gmail resumable upload initiation (metadata POST to /_/upload)
+    if _is_gmail_resumable_initiation(flow):
+        _track_gmail_resumable_initiation(flow)
+        return  # Just metadata, not the actual file
+
+    # Gmail resumable upload (raw file bytes with upload_protocol=resumable)
+    if _is_gmail_resumable_upload(flow):
+        _handle_gmail_resumable_upload(flow)
+        return
+
+    # Gmail multipart/form-data attachment upload
+    if _is_gmail_attachment_upload(flow):
+        _handle_gmail_attachments(flow)
+        return
 
     if not _is_upload(flow):
         return
@@ -173,12 +201,17 @@ def request(flow: http.HTTPFlow) -> None:
 
 def response(flow: http.HTTPFlow) -> None:
     """For batch resumable upload step-1 responses, extract upload_id from the
-    multipart/mixed body (Google Batch API format)."""
+    multipart/mixed body (Google Batch API format).
+    Also extract upload_id from Gmail resumable initiation responses."""
+    # Google Drive batch resumable
     flow_id = id(flow)
-    if flow_id not in _pending_resumable:
-        return
-    filename = _pending_resumable.pop(flow_id)
-    _extract_upload_id_from_batch_response(flow, filename)
+    if flow_id in _pending_resumable:
+        filename = _pending_resumable.pop(flow_id)
+        _extract_upload_id_from_batch_response(flow, filename)
+
+    # Gmail resumable initiation response
+    if flow_id in _gmail_pending_resumable:
+        _extract_filename_from_gmail_resumable_response(flow)
 
 
 def _extract_upload_id_from_batch_response(flow: http.HTTPFlow, filename: str) -> None:
@@ -580,6 +613,426 @@ def _parse_multipart_related(body: bytes, content_type: str):
     except Exception as e:
         log.warning("Failed to parse multipart/related: %s", e, exc_info=True)
         return "", body, ""
+
+
+# ---------------------------------------------------------------------------
+# Gmail attachment handling
+# ---------------------------------------------------------------------------
+
+_GMAIL_HOSTS = (
+    "mail.google.com",
+    "content-gmail.google.com",
+    "content-upload.mail.google.com",
+)
+
+# Gmail resumable upload tracking (same pattern as Drive batch resumable):
+# Initiation POST → _gmail_pending_resumable[id(flow)] = filename
+# Initiation response → _gmail_resumable_filenames[upload_id] = filename
+# File PUT/POST → look up upload_id in _gmail_resumable_filenames
+_gmail_pending_resumable: dict = {}       # flow id → filename
+_gmail_resumable_filenames: dict = {}     # upload_id → filename
+
+
+def _is_gmail_attachment_upload(flow: http.HTTPFlow) -> bool:
+    """Detect Gmail compose attachment upload requests (multipart/form-data)."""
+    if flow.request.method != "POST":
+        return False
+    host = flow.request.pretty_host.lower()
+    if not any(host == h or host.endswith("." + h) for h in _GMAIL_HOSTS):
+        return False
+    content_type = flow.request.headers.get("content-type", "").lower()
+    if "multipart/form-data" not in content_type:
+        return False
+    body = flow.request.content
+    if not body:
+        return False
+    return _has_file_parts(body, content_type)
+
+
+def _is_gmail_resumable_upload(flow: http.HTTPFlow) -> bool:
+    """Detect Gmail resumable upload (raw file bytes with upload_protocol=resumable)."""
+    if flow.request.method not in ("POST", "PUT"):
+        return False
+    host = flow.request.pretty_host.lower()
+    if not any(host == h or host.endswith("." + h) for h in _GMAIL_HOSTS):
+        return False
+    query = flow.request.query
+    upload_protocol = query.get("upload_protocol", "")
+    upload_id = query.get("upload_id", "")
+    # Resumable upload: has upload_protocol=resumable OR tracked upload_id
+    if upload_protocol.lower() == "resumable":
+        return True
+    if upload_id and upload_id in _gmail_resumable_filenames:
+        return True
+    return False
+
+
+def _is_gmail_resumable_initiation(flow: http.HTTPFlow) -> bool:
+    """Detect Gmail resumable upload initiation (metadata POST to /_/upload without upload_protocol)."""
+    if flow.request.method != "POST":
+        return False
+    host = flow.request.pretty_host.lower()
+    if not any(host == h or host.endswith("." + h) for h in _GMAIL_HOSTS):
+        return False
+    path = flow.request.path.lower()
+    if "/_/upload" not in path:
+        return False
+    query = flow.request.query
+    # Initiation: has /_/upload but NO upload_protocol=resumable
+    return query.get("upload_protocol", "").lower() != "resumable"
+
+
+def _has_file_parts(body: bytes, content_type: str) -> bool:
+    """Quick check: does the multipart body contain any file parts?"""
+    try:
+        boundary = _extract_boundary(content_type)
+        if not boundary:
+            return False
+        delimiter = ("--" + boundary).encode()
+        for chunk in body.split(delimiter):
+            if b"filename=" in chunk and b"Content-Type:" in chunk:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _handle_gmail_attachments(flow: http.HTTPFlow) -> None:
+    """Extract each attachment from a Gmail compose upload and run DLP check."""
+    url = flow.request.pretty_url
+    if _is_blocked_url(url):
+        log.debug("BLOCK (cached) | Gmail attachment | %s", url[:80])
+        _block_gmail(flow)
+        return
+
+    body = flow.request.content
+    content_type = flow.request.headers.get("content-type", "")
+    attachments = _parse_gmail_attachments(body, content_type)
+
+    if not attachments:
+        log.debug("SKIP Gmail upload: no extractable attachments | %s", url[:80])
+        return
+
+    # Check each attachment against DLP policy
+    for filename, file_body, file_mime in attachments:
+        if not _matches_type_filter(filename, file_mime):
+            log.debug("SKIP (type filter) | Gmail | %s | %s", filename, file_mime)
+            continue
+
+        try:
+            temp_path = _write_temp_file(file_body, filename)
+        except OSError as e:
+            log.error("Failed to write temp file for Gmail attachment '%s': %s", filename, e)
+            if not _cfg.fail_open():
+                _block_gmail(flow)
+            return
+
+        payload = {
+            "channel": "browser",
+            "kind": "file",
+            "file_path": temp_path,
+            "metadata": {
+                "url": flow.request.pretty_url,
+                "filename": filename,
+                "size_bytes": len(file_body),
+                "service": "gmail",
+                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            },
+        }
+
+        decision, consumer_received = _consult_policy(payload)
+
+        if not consumer_received:
+            _delete_temp_file(temp_path)
+
+        if decision == "BLOCK":
+            log.info("BLOCK | Gmail attachment | %s | %d bytes | %s",
+                     filename, len(file_body), url[:80])
+            _cache_blocked_url(url)
+            _block_gmail(flow)
+            return
+        else:
+            log.info("ALLOW | Gmail attachment | %s | %d bytes | %s",
+                     filename, len(file_body), url[:80])
+
+
+def _handle_gmail_resumable_upload(flow: http.HTTPFlow) -> None:
+    """Handle Gmail resumable upload (raw file bytes)."""
+    url = flow.request.pretty_url
+    if _is_blocked_url(url):
+        log.debug("BLOCK (cached) | Gmail resumable upload | %s", url[:80])
+        _block_gmail(flow)
+        return
+
+    # Get filename from tracked resumable or from URL
+    query = flow.request.query
+    upload_id = query.get("upload_id", "")
+    filename = _gmail_resumable_filenames.get(upload_id, "")
+    if not filename:
+        # Fallback: try to extract from URL path
+        path_segment = flow.request.path.split("?")[0].rsplit("/", 1)[-1]
+        filename = path_segment if path_segment else "gmail_attachment"
+
+    body = flow.request.content
+    if not body:
+        log.warning("Empty body for Gmail resumable upload | %s", url[:80])
+        return
+
+    file_mime = flow.request.headers.get("content-type", "").split(";")[0].strip().lower()
+
+    if not _matches_type_filter(filename, file_mime):
+        log.debug("SKIP (type filter) | Gmail resumable | %s | %s", filename, file_mime)
+        return
+
+    try:
+        temp_path = _write_temp_file(body, filename)
+    except OSError as e:
+        log.error("Failed to write temp file for Gmail resumable '%s': %s", filename, e)
+        if not _cfg.fail_open():
+            _block_gmail(flow)
+        return
+
+    payload = {
+        "channel": "browser",
+        "kind": "file",
+        "file_path": temp_path,
+        "metadata": {
+            "url": flow.request.pretty_url,
+            "filename": filename,
+            "size_bytes": len(body),
+            "service": "gmail",
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        },
+    }
+
+    decision, consumer_received = _consult_policy(payload)
+
+    if not consumer_received:
+        _delete_temp_file(temp_path)
+
+    if decision == "BLOCK":
+        log.info("BLOCK | Gmail resumable upload | %s | %d bytes | %s",
+                 filename, len(body), url[:80])
+        _cache_blocked_url(url)
+        _block_gmail(flow)
+    else:
+        log.info("ALLOW | Gmail resumable upload | %s | %d bytes | %s",
+                 filename, len(body), url[:80])
+
+
+def _track_gmail_resumable_initiation(flow: http.HTTPFlow) -> None:
+    """Extract filename from Gmail resumable upload initiation POST."""
+    body = flow.request.content
+    if not body:
+        return
+
+    content_type = flow.request.headers.get("content-type", "").lower()
+
+    # Try JSON body first
+    if "application/json" in content_type:
+        try:
+            metadata = json.loads(body.decode("utf-8"))
+            filename = metadata.get("filename") or metadata.get("name") or metadata.get("title") or ""
+            if filename:
+                _gmail_pending_resumable[id(flow)] = filename
+                log.debug("Gmail resumable init (JSON): queued filename=%r", filename)
+            return
+        except Exception:
+            pass
+
+    # Try multipart/form-data body
+    if "multipart/form-data" in content_type:
+        boundary = _extract_boundary(content_type)
+        if boundary:
+            delimiter = ("--" + boundary).encode()
+            for chunk in body.split(delimiter):
+                if b"filename=" not in chunk:
+                    continue
+                filename = _extract_filename_from_multipart_chunk(chunk)
+                if filename:
+                    _gmail_pending_resumable[id(flow)] = filename
+                    log.debug("Gmail resumable init (multipart): queued filename=%r", filename)
+                    return
+
+
+def _extract_filename_from_gmail_resumable_response(flow: http.HTTPFlow) -> None:
+    """Extract upload_id from Gmail resumable initiation response and correlate with filename."""
+    flow_id = id(flow)
+    if flow_id not in _gmail_pending_resumable:
+        return
+
+    filename = _gmail_pending_resumable.pop(flow_id)
+
+    # Try to get upload_id from response headers (X-GUploader-UploadID or Location)
+    upload_id = (
+        flow.response.headers.get("x-guploader-uploadid", "")
+        or flow.response.headers.get("x-gupload-uploadid", "")
+    )
+
+    # Try to extract from response body if it contains upload_id
+    if not upload_id and flow.response.content:
+        try:
+            body = flow.response.content.decode("utf-8", errors="replace")
+            # Gmail may return upload_id in various formats
+            for key in ("upload_id", "uploadId", "X-GUploader-UploadID"):
+                if key in body:
+                    # Try to extract value after the key
+                    idx = body.index(key)
+                    rest = body[idx + len(key):]
+                    for sep in ('"', "'", ":", "=", ">"):
+                        if sep in rest:
+                            val = rest.split(sep, 1)[1]
+                            for end_sep in ('"', "'", "&", "<", " ", "\n", "\r"):
+                                if end_sep in val:
+                                    upload_id = val.split(end_sep, 1)[0].strip()
+                                    break
+                            if upload_id:
+                                break
+                    if upload_id:
+                        break
+        except Exception:
+            pass
+
+    # If no upload_id found, use flow ID as fallback key
+    if not upload_id:
+        upload_id = f"gmail_flow_{flow_id}"
+        log.debug("Gmail resumable: no upload_id in response, using fallback key for %r", filename)
+
+    _gmail_resumable_filenames[upload_id] = filename
+    log.debug("Gmail resumable tracked: upload_id=%r → %r", upload_id, filename)
+
+
+def _block_gmail(flow: http.HTTPFlow) -> None:
+    """Return a 403 response for a Gmail upload request."""
+    flow.response = http.Response.make(
+        403,
+        b"Attachment blocked by DLP policy.",
+        {"Content-Type": "text/plain"},
+    )
+
+
+def _parse_gmail_attachments(body: bytes, content_type: str) -> list[tuple[str, bytes, str]]:
+    """
+    Parse a multipart/form-data Gmail compose body and extract all file attachments.
+    Returns list of (filename, file_bytes, mime_type).
+    """
+    attachments: list[tuple[str, bytes, str]] = []
+    try:
+        boundary = _extract_boundary(content_type)
+        if not boundary:
+            return attachments
+
+        delimiter = ("--" + boundary).encode()
+        for chunk in body.split(delimiter):
+            chunk = chunk.lstrip(b"\r\n")
+            stripped = chunk.rstrip(b"\r\n")
+            if not stripped or stripped == b"--" or stripped == b"--\r\n":
+                continue
+
+            sep = b"\r\n\r\n" if b"\r\n\r\n" in chunk else b"\n\n"
+            header_end = chunk.find(sep)
+            if header_end == -1:
+                continue
+
+            header_bytes = chunk[:header_end]
+            part_body = chunk[header_end + len(sep):].rstrip(b"\r\n")
+
+            # Check for filename in Content-Disposition
+            cd = _extract_cd_from_headers(header_bytes)
+            if not cd or b"filename=" not in cd.lower():
+                continue
+
+            filename = _extract_filename_from_cd(cd)
+            if not filename:
+                continue
+
+            # Extract content type of the part
+            part_mime = ""
+            transfer_encoding = ""
+            sep_line = b"\r\n" if b"\r\n" in header_bytes else b"\n"
+            for line in header_bytes.split(sep_line):
+                ll = line.lower()
+                if ll.startswith(b"content-type:") and b"multipart" not in ll:
+                    part_mime = line[len(b"content-type:"):].strip().decode("utf-8", errors="replace")
+                    part_mime = part_mime.split(";")[0].strip().lower()
+                elif ll.startswith(b"content-transfer-encoding:"):
+                    transfer_encoding = line[len(b"content-transfer-encoding:"):].strip().decode("utf-8", errors="replace").strip().lower()
+
+            file_bytes = part_body
+            if transfer_encoding == "base64":
+                try:
+                    file_bytes = base64.b64decode(file_bytes)
+                except Exception:
+                    pass
+
+            attachments.append((filename, file_bytes, part_mime))
+
+    except Exception as e:
+        log.warning("Failed to parse Gmail attachments: %s", e, exc_info=True)
+
+    return attachments
+
+
+def _extract_boundary(content_type: str) -> str | None:
+    """Extract boundary string from a multipart Content-Type header."""
+    for segment in content_type.split(";"):
+        segment = segment.strip()
+        if segment.lower().startswith("boundary="):
+            return segment[len("boundary="):].strip('"').strip("'")
+    return None
+
+
+def _extract_cd_from_headers(header_bytes: bytes) -> bytes:
+    """Extract Content-Disposition value from raw header bytes."""
+    sep_line = b"\r\n" if b"\r\n" in header_bytes else b"\n"
+    for line in header_bytes.split(sep_line):
+        if line.lower().startswith(b"content-disposition:"):
+            return line[len(b"content-disposition:"):].strip()
+    return b""
+
+
+def _extract_filename_from_multipart_chunk(chunk: bytes) -> str:
+    """Extract filename from a multipart/form-data chunk's headers."""
+    sep = b"\r\n\r\n" if b"\r\n\r\n" in chunk else b"\n\n"
+    header_end = chunk.find(sep)
+    if header_end == -1:
+        return ""
+    raw_headers = chunk[:header_end].lstrip(b"\r\n")
+    cd = _extract_cd_from_headers(raw_headers)
+    if not cd:
+        return ""
+    return _extract_filename_from_cd(cd)
+
+
+def _extract_filename_from_cd(cd: bytes) -> str:
+    """Extract filename from a Content-Disposition header value."""
+    # Try filename*=UTF-8''... first (RFC 5987)
+    try:
+        idx = cd.lower().index(b"filename*=")
+        val = cd[idx + len(b"filename*="):]
+        # Format: UTF-8''encoded-text or charset="UTF-8"''text
+        if b"''" in val:
+            val = val.split(b"''", 1)[1]
+        filename = unquote(val.decode("utf-8", errors="replace"))
+        if filename:
+            return filename
+    except (ValueError, IndexError):
+        pass
+
+    # Try filename="..." or filename=...
+    try:
+        idx = cd.lower().index(b"filename=")
+        val = cd[idx + len(b"filename="):].strip()
+        if val.startswith(b'"'):
+            end = val.index(b'"', 1)
+            return val[1:end].decode("utf-8", errors="replace")
+        else:
+            end = val.index(b";") if b";" in val else len(val)
+            return val[:end].strip().decode("utf-8", errors="replace")
+    except (ValueError, IndexError):
+        pass
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
