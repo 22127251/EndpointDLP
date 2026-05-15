@@ -23,6 +23,68 @@ from config import Config, load_config
 
 log = logging.getLogger(__name__)
 
+# Magic bytes → file extension mapping for Gmail resumable uploads
+# (Gmail sends all resumable uploads as application/octet-stream)
+_MAGIC_BYTES = [
+    (b"%PDF", ".pdf"),
+    (b"PK\x03\x04", ".zip"),  # .docx, .xlsx, .pptx are also ZIP-based
+    (b"\xd0\xcf\x11\xe0", ".doc"),  # Old Office formats (OLE2)
+    (b"\x50\x4b\x03\x04", ".docx"),  # Will be refined by content analysis
+]
+
+# ODF files (.odt, .ods, .odp) are also ZIP-based, detected as .zip by magic bytes.
+# The DLP engine's extractor will handle them based on content structure.
+
+# Refined detection: ZIP files that contain specific internal files
+_ZIP_SIGNATURE = b"PK\x03\x04"
+_DOCX_ZIP_MARKERS = [b"word/", b"docProps/", b"[Content_Types].xml"]
+_XLSX_ZIP_MARKERS = [b"xl/", b"docProps/", b"[Content_Types].xml"]
+_PPTX_ZIP_MARKERS = [b"ppt/", b"docProps/", b"[Content_Types].xml"]
+_ODT_ZIP_MARKERS = [b"content.xml", b"meta.xml", b"META-INF/"]
+
+
+def _detect_extension_from_content(body: bytes, current_filename: str) -> str:
+    """Detect file extension from magic bytes when MIME type is application/octet-stream."""
+    if not body:
+        return current_filename
+
+    # Check magic bytes
+    for magic, ext in _MAGIC_BYTES:
+        if body.startswith(magic):
+            # For ZIP-based formats, try to determine the specific type
+            if magic == _ZIP_SIGNATURE or body.startswith(_ZIP_SIGNATURE):
+                ext = _detect_office_type_from_zip(body)
+            if ext:
+                # Replace filename with one that has the detected extension
+                base = os.path.splitext(current_filename)[0] if current_filename else "upload"
+                return base + ext
+            break
+
+    return current_filename
+
+
+def _detect_office_type_from_zip(body: bytes) -> str:
+    """Detect specific Office/ODF format from ZIP file contents."""
+    try:
+        import zipfile
+        import io
+        with zipfile.ZipFile(io.BytesIO(body)) as zf:
+            names = zf.namelist()
+            # Check for ODF first (has META-INF/)
+            if any("META-INF/" in n or n == "content.xml" for n in names):
+                # Could be .odt, .ods, .odp — default to .odt for text documents
+                return ".odt"
+            # Check for Office formats
+            if any(n.startswith("word/") for n in names):
+                return ".docx"
+            if any(n.startswith("xl/") for n in names):
+                return ".xlsx"
+            if any(n.startswith("ppt/") for n in names):
+                return ".pptx"
+    except Exception:
+        pass
+    return ".zip"  # Generic ZIP fallback
+
 _upload_lock = threading.Lock()
 _cfg: Config = Config()
 
@@ -780,9 +842,20 @@ def _handle_gmail_resumable_upload(flow: http.HTTPFlow) -> None:
 
     file_mime = flow.request.headers.get("content-type", "").split(";")[0].strip().lower()
 
-    if not _matches_type_filter(filename, file_mime):
-        log.debug("SKIP (type filter) | Gmail resumable | %s | %s", filename, file_mime)
-        return
+    # Gmail resumable uploads always use application/octet-stream regardless of
+    # actual file type. The URL pattern (/_/upload + upload_protocol=resumable)
+    # is already a strong upload signal — skip type filter and let DLP engine
+    # analyze the actual content.
+    if not file_mime.startswith("application/octet-stream"):
+        if not _matches_type_filter(filename, file_mime):
+            log.debug("SKIP (type filter) | Gmail resumable | %s | %s", filename, file_mime)
+            return
+
+    # Detect actual file extension from magic bytes (Gmail sends everything as octet-stream)
+    original_filename = filename
+    filename = _detect_extension_from_content(body, filename)
+    if filename != original_filename:
+        log.debug("Detected file type from content: %s → %s", original_filename, filename)
 
     try:
         temp_path = _write_temp_file(body, filename)
