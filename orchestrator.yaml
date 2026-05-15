@@ -2,9 +2,10 @@ data_pipe:   "\\\\.\\pipe\\dlp_agent"
 ctl_pipe:    "\\\\.\\pipe\\dlp_agent_ctl"
 
 pools:
-  clipboard_workers: 2
-  browser_workers:   3
-  pipe_listeners:    4
+  clipboard_workers:          2
+  browser_workers:            3
+  peripheral_storage_workers: 2
+  pipe_listeners:             4
 
 limits:
   max_clipboard_bytes: 1048576       # 1 MB
