@@ -1,8 +1,8 @@
 pipe_name: "\\\\.\\pipe\\dlp_agent"
 timeout_seconds: 5
-fail_behavior: "block"        # "allow" or "block" on timeout/error
-temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp"  # empty string = use system %TEMP%
-min_upload_size_bytes: 1024   # ignore non-multipart bodies smaller than this
+fail_behavior: "block" # "allow" or "block" on timeout/error
+temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp" # empty string = use system %TEMP%
+min_upload_size_bytes: 1024 # ignore non-multipart bodies smaller than this
 
 # Domains to skip unconditionally (analytics, telemetry, logging)
 domain_blocklist:
@@ -30,6 +30,9 @@ extensions:
   - .xlsx
   - .ppt
   - .pptx
+  - .odt
+  - .ods
+  - .odp
   - .zip
   - .rar
   - .7z
@@ -46,6 +49,9 @@ mime_types:
   - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
   - application/vnd.ms-powerpoint
   - application/vnd.openxmlformats-officedocument.presentationml.presentation
+  - application/vnd.oasis.opendocument.text
+  - application/vnd.oasis.opendocument.spreadsheet
+  - application/vnd.oasis.opendocument.presentation
   - application/zip
   - application/x-rar-compressed
   - application/x-7z-compressed

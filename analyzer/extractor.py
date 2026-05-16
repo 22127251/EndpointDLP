@@ -48,7 +48,7 @@ class TabularData:
 # Routing helpers
 # ---------------------------------------------------------------------------
 
-_TABULAR_SUFFIXES = {".csv", ".tsv", ".xlsx", ".ods", ".docx", ".odt"}
+_TABULAR_SUFFIXES = {".tsv", ".xlsx", ".ods", ".docx", ".odt"}
 
 
 def is_tabular(file_path: str | Path) -> bool:
