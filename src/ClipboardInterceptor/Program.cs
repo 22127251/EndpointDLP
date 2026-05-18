@@ -1,14 +1,8 @@
 using AgentCore;
 using ClipboardInterceptor;
-using Microsoft.Win32;
 
-const string ClipboardHistoryRegKey = @"HKEY_CURRENT_USER\Software\Microsoft\Clipboard";
-const string ClipboardHistoryRegValue = "EnableClipboardHistory";
-
-// --- Disable clipboard history ---
-object? previousValue = Registry.GetValue(ClipboardHistoryRegKey, ClipboardHistoryRegValue, null);
-Registry.SetValue(ClipboardHistoryRegKey, ClipboardHistoryRegValue, 0, RegistryValueKind.DWord);
-Console.WriteLine("[DLP] Clipboard history disabled.");
+// --- Enforce clipboard history disabled (watches registry for re-enable attempts) ---
+using var enforcer = new ClipboardHistoryEnforcer();
 
 // --- Wire up components ---
 var agentCore = new PipeAgentCore();
@@ -33,11 +27,5 @@ try
 }
 catch (OperationCanceledException) { }
 
-// --- Restore clipboard history ---
 Console.WriteLine("\n[DLP] Shutting down...");
-if (previousValue is int prev)
-    Registry.SetValue(ClipboardHistoryRegKey, ClipboardHistoryRegValue, prev, RegistryValueKind.DWord);
-else
-    Registry.SetValue(ClipboardHistoryRegKey, ClipboardHistoryRegValue, 1, RegistryValueKind.DWord);
-
-Console.WriteLine("[DLP] Clipboard history restored.");
+// enforcer.Dispose() is called implicitly by 'using' — restores clipboard history
