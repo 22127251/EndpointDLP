@@ -13,10 +13,17 @@ internal sealed class TransferForm : Form
 
     private enum TransferStatus { Copied, Skipped, Blocked, CopyFailed }
 
+    private record TransferItem(
+        string SourcePath,    // absolute source file path
+        string DestPath,      // absolute destination file path (may be nested inside a folder)
+        string DisplayName,   // relative name shown in ListView, e.g. "Folder\sub\file.txt"
+        long   SizeBytes);
+
     // ── state ────────────────────────────────────────────────────────────────
-    private readonly string[]              _sources;
-    private readonly string                _destFolder;
-    private          CancellationTokenSource _cts = new();
+    private readonly string[]               _sources;
+    private readonly string                 _destFolder;
+    private          List<TransferItem>     _items = new();
+    private          CancellationTokenSource _cts  = new();
 
     // ── controls ─────────────────────────────────────────────────────────────
     private readonly Label       _lblStatus;
@@ -30,9 +37,10 @@ internal sealed class TransferForm : Form
         _destFolder = destFolder;
 
         Text            = "DLP File Transfer";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox     = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox     = true;
         MinimizeBox     = false;
+        MinimumSize     = new Size(420, 260);
         StartPosition   = FormStartPosition.CenterScreen;
         ClientSize      = new Size(520, 260);
         Font            = new Font("Segoe UI", 9f);
@@ -43,6 +51,7 @@ internal sealed class TransferForm : Form
             AutoSize  = false,
             TextAlign = ContentAlignment.MiddleLeft,
             Bounds    = new Rectangle(Pad, Pad, ClientSize.Width - Pad * 2, 24),
+            Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
 
         // ── indeterminate progress bar ────────────────────────────────────
@@ -50,6 +59,7 @@ internal sealed class TransferForm : Form
         {
             Style  = ProgressBarStyle.Marquee,
             Bounds = new Rectangle(Pad, Pad + 28, ClientSize.Width - Pad * 2, 20),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
 
         // ── results list view ─────────────────────────────────────────────
@@ -61,6 +71,7 @@ internal sealed class TransferForm : Form
             Bounds        = new Rectangle(Pad, Pad + 28, ClientSize.Width - Pad * 2,
                                           ClientSize.Height - Pad * 3 - BtnH - 28),
             Visible       = false,
+            Anchor        = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
         };
         _listView.Columns.Add("File",   260);
         _listView.Columns.Add("Status",  80);
@@ -73,6 +84,7 @@ internal sealed class TransferForm : Form
         {
             Text   = "Cancel",
             Bounds = new Rectangle(ClientSize.Width - Pad - BtnW, btnY, BtnW, BtnH),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
         _btnCancel.Click += OnCloseClick;
 
@@ -84,6 +96,34 @@ internal sealed class TransferForm : Form
     protected override async void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
+
+        _items = ExpandSources(_sources, _destFolder);
+
+        if (_items.Count == 0)
+        {
+            MessageBox.Show("No files found to transfer.", "DLP File Transfer",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Close();
+            return;
+        }
+
+        var conflicts = FindFolderConflicts(_sources, _destFolder);
+        if (conflicts.Count > 0)
+        {
+            string names = string.Join("\n  ", conflicts.Select(c => $"\"{c}\""));
+            var dr = MessageBox.Show(
+                $"The following folder(s) already exist at the destination and will be merged:\n\n  {names}\n\nClick OK to override (merge), or Cancel to abort the transfer.",
+                "Folder Already Exists",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (dr != DialogResult.OK)
+            {
+                Close();
+                return;
+            }
+        }
+
         await RunAtomicScanTransferAsync();
     }
 
@@ -94,27 +134,69 @@ internal sealed class TransferForm : Form
         base.OnFormClosed(e);
     }
 
+    // ── source expansion ──────────────────────────────────────────────────────
+
+    private static List<TransferItem> ExpandSources(string[] sources, string destFolder)
+    {
+        var items = new List<TransferItem>();
+        foreach (string src in sources)
+        {
+            if (System.IO.Directory.Exists(src))
+            {
+                string folderName = System.IO.Path.GetFileName(src.TrimEnd('\\', '/'));
+                foreach (string file in System.IO.Directory.EnumerateFiles(
+                             src, "*", System.IO.SearchOption.AllDirectories))
+                {
+                    string rel      = System.IO.Path.GetRelativePath(src, file);
+                    string display  = System.IO.Path.Combine(folderName, rel);
+                    string destPath = System.IO.Path.Combine(destFolder, folderName, rel);
+                    long   size     = 0;
+                    try { size = new System.IO.FileInfo(file).Length; } catch { }
+                    items.Add(new TransferItem(file, destPath, display, size));
+                }
+            }
+            else
+            {
+                string fileName = System.IO.Path.GetFileName(src);
+                string destPath = System.IO.Path.Combine(destFolder, fileName);
+                long   size     = 0;
+                try { size = new System.IO.FileInfo(src).Length; } catch { }
+                items.Add(new TransferItem(src, destPath, fileName, size));
+            }
+        }
+        return items;
+    }
+
+    private static List<string> FindFolderConflicts(string[] sources, string destFolder)
+    {
+        var conflicts = new List<string>();
+        foreach (string src in sources)
+        {
+            if (!System.IO.Directory.Exists(src)) continue;
+            string folderName = System.IO.Path.GetFileName(src.TrimEnd('\\', '/'));
+            if (System.IO.Directory.Exists(System.IO.Path.Combine(destFolder, folderName)))
+                conflicts.Add(folderName);
+        }
+        return conflicts;
+    }
+
     // ── atomic scan + transfer ────────────────────────────────────────────────
 
     private async Task RunAtomicScanTransferAsync()
     {
-        _lblStatus.Text      = $"Scanning and transferring {_sources.Length} file(s)…";
+        _lblStatus.Text      = $"Scanning and transferring {_items.Count} file(s)…";
         _progressBar.Style   = ProgressBarStyle.Marquee;
         _progressBar.Visible = true;
         _listView.Visible    = false;
 
-        var tasks = _sources.Select(async src =>
+        var tasks = _items.Select(async item =>
         {
-            var fi  = new System.IO.FileInfo(src);
             var req = new TransferRequest(
-                src,
-                System.IO.Path.Combine(_destFolder, fi.Name),
-                fi.Name,
-                fi.Exists ? fi.Length : 0L);
+                item.SourcePath,
+                item.DestPath,
+                System.IO.Path.GetFileName(item.SourcePath),
+                item.SizeBytes);
 
-            // Snapshot: a stable, exclusively-locked copy taken at scan time.
-            // FileShare.None prevents any other process from opening it for reading or writing.
-            // Lifetime: from creation through USB copy completion, then deleted in finally.
             string snapshotPath = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(),
                 $"dlpsnap_{Guid.NewGuid():N}.tmp");
@@ -129,18 +211,14 @@ internal sealed class TransferForm : Form
                     bufferSize: 81920,
                     useAsync: true);
 
-                // Copy source → snapshot. File.OpenRead uses FileShare.Read,
-                // blocking writes to the source during this copy.
-                using (var srcStream = System.IO.File.OpenRead(src))
+                using (var srcStream = System.IO.File.OpenRead(item.SourcePath))
                     await srcStream.CopyToAsync(snapshotStream, _cts.Token);
                 snapshotStream.Position = 0;
 
-                // SHA-256 of the locked snapshot for audit trail.
                 byte[] hashBytes = await SHA256.HashDataAsync(snapshotStream, _cts.Token);
                 string fileHash  = Convert.ToHexString(hashBytes).ToLowerInvariant();
                 snapshotStream.Position = 0;
 
-                // Orchestrator analyzes a temp copy derived from the snapshot stream.
                 var result = await OrchestratorClient.AnalyzeAsync(
                     req, snapshotStream, fileHash, _cts.Token);
 
@@ -148,47 +226,55 @@ internal sealed class TransferForm : Form
                 {
                     try
                     {
-                        string dest = System.IO.Path.Combine(_destFolder, fi.Name);
+                        // Create parent dirs before writing — handles nested folder structures.
+                        string? parentDir = System.IO.Path.GetDirectoryName(item.DestPath);
+                        if (parentDir is not null)
+                            System.IO.Directory.CreateDirectory(parentDir);
+
                         snapshotStream.Position = 0;
                         using var destStream = new System.IO.FileStream(
-                            dest,
+                            item.DestPath,
                             System.IO.FileMode.CreateNew,
                             System.IO.FileAccess.Write,
                             System.IO.FileShare.None,
                             bufferSize: 81920,
                             useAsync: true);
                         await snapshotStream.CopyToAsync(destStream, _cts.Token);
-                        NativeMethods.NotifyFileCreated(dest);
-                        return (result, TransferStatus.Copied);
+                        NativeMethods.NotifyFileCreated(item.DestPath);
+                        return (result, TransferStatus.Copied, item.DisplayName, item.SizeBytes);
                     }
                     catch (System.IO.IOException)
                     {
                         return (result with { ErrorMessage = "Destination exists — skipped." },
-                                TransferStatus.Skipped);
+                                TransferStatus.Skipped, item.DisplayName, item.SizeBytes);
                     }
                     catch (Exception ex)
                     {
                         return (result with { ErrorMessage = $"Copy failed: {ex.Message}" },
-                                TransferStatus.CopyFailed);
+                                TransferStatus.CopyFailed, item.DisplayName, item.SizeBytes);
                     }
                 }
 
-                return (result, TransferStatus.Blocked);
+                return (result, TransferStatus.Blocked, item.DisplayName, item.SizeBytes);
             }
             catch (OperationCanceledException) { throw; }
+            catch (System.IO.FileNotFoundException)
+            {
+                return (new TransferResult(item.SourcePath, false, "Source file removed before transfer."),
+                        TransferStatus.Blocked, item.DisplayName, item.SizeBytes);
+            }
             catch (Exception ex)
             {
-                return (new TransferResult(src, false, $"Snapshot error: {ex.Message}"),
-                        TransferStatus.Blocked);
+                return (new TransferResult(item.SourcePath, false, $"Snapshot error: {ex.Message}"),
+                        TransferStatus.Blocked, item.DisplayName, item.SizeBytes);
             }
             finally
             {
-                // snapshotStream 'using' above has already closed the handle by now.
                 try { System.IO.File.Delete(snapshotPath); } catch { }
             }
         });
 
-        (TransferResult result, TransferStatus status)[] outcomes;
+        (TransferResult result, TransferStatus status, string displayName, long sizeBytes)[] outcomes;
         try
         {
             outcomes = await Task.WhenAll(tasks);
@@ -204,7 +290,8 @@ internal sealed class TransferForm : Form
 
     // ── done stage ────────────────────────────────────────────────────────────
 
-    private void ShowDoneStage((TransferResult result, TransferStatus status)[] outcomes)
+    private void ShowDoneStage(
+        (TransferResult result, TransferStatus status, string displayName, long sizeBytes)[] outcomes)
     {
         _progressBar.Visible = false;
         _listView.Visible    = true;
@@ -213,9 +300,8 @@ internal sealed class TransferForm : Form
         _listView.Items.Clear();
         int copied = 0, skipped = 0, blocked = 0;
 
-        foreach (var (result, status) in outcomes)
+        foreach (var (result, status, displayName, sizeBytes) in outcomes)
         {
-            var    fi         = new System.IO.FileInfo(result.FilePath);
             string statusText = status switch
             {
                 TransferStatus.Copied     => "TRANSFERRED",
@@ -230,9 +316,9 @@ internal sealed class TransferForm : Form
             string note = result.ErrorMessage
                 ?? (result.FileHash is not null ? $"sha256:{result.FileHash[..16]}…" : "");
 
-            var item = new ListViewItem(fi.Name);
+            var item = new ListViewItem(displayName);
             item.SubItems.Add(statusText);
-            item.SubItems.Add(fi.Exists ? FormatSize(fi.Length) : "?");
+            item.SubItems.Add(FormatSize(sizeBytes));
             item.SubItems.Add(note);
             item.ForeColor = color;
             _listView.Items.Add(item);
