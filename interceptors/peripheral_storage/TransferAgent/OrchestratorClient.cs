@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -12,39 +13,47 @@ internal sealed record TransferRequest(
     long   SizeBytes);
 
 internal sealed record TransferResult(
-    string FilePath,
-    bool   Allowed,
-    string? ErrorMessage = null);
+    string  FilePath,
+    bool    Allowed,
+    string? ErrorMessage = null,
+    string? FileHash     = null);   // SHA-256 hex of snapshot (audit trail)
 
 internal static class OrchestratorClient
 {
-    private const string PipeName        = "dlp_agent";
+    private const string PipeName         = "dlp_agent";
     private const int    ConnectTimeoutMs = 5_000;
     private const int    AnalysisTimeoutS = 10;
 
     private static readonly JsonSerializerOptions s_jsonOpts = new()
     {
-        PropertyNamingPolicy        = JsonNamingPolicy.SnakeCaseLower,
-        DefaultIgnoreCondition      = JsonIgnoreCondition.WhenWritingNull,
+        PropertyNamingPolicy   = JsonNamingPolicy.SnakeCaseLower,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    // snapshotStream: the caller-owned, exclusively-locked snapshot stream.
+    // This method creates an orchestrator temp from it (orchestrator deletes the temp after analysis).
     internal static async Task<TransferResult> AnalyzeAsync(
-        TransferRequest req, CancellationToken ct)
+        TransferRequest   req,
+        Stream            snapshotStream,
+        string            fileHash,
+        CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(AnalysisTimeoutS));
 
-        // Copy the source file to a temp path.  The orchestrator always deletes
-        // the file it receives (designed for temp copies); sending the original
-        // path would delete the user's file before it can be transferred.
-        string shortId  = Guid.NewGuid().ToString("N")[..8];
+        string ext      = Path.GetExtension(req.FileName);
         string tempPath = Path.Combine(
             Path.GetTempPath(),
-            $"dlp_{shortId}_{Path.GetFileName(req.FilePath)}");
-        File.Copy(req.FilePath, tempPath, overwrite: false);
+            $"dlp_{Guid.NewGuid():N}{ext}");
 
         try
         {
+            snapshotStream.Position = 0;
+            using (var tempStream = new FileStream(
+                tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, true))
+                await snapshotStream.CopyToAsync(tempStream, cts.Token);
+            snapshotStream.Position = 0;
+
             using var pipe = new NamedPipeClientStream(
                 ".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
 
@@ -55,7 +64,7 @@ internal static class OrchestratorClient
             {
                 channel   = "peripheral_storage",
                 kind      = "file",
-                file_path = tempPath,   // orchestrator analyzes and deletes the copy
+                file_path = tempPath,   // orchestrator analyzes and deletes this copy
                 metadata  = new
                 {
                     filename        = req.FileName,
@@ -68,22 +77,29 @@ internal static class OrchestratorClient
             byte[] requestBytes = JsonSerializer.SerializeToUtf8Bytes(payload, s_jsonOpts);
             await pipe.WriteAsync(requestBytes, cts.Token);
 
-            byte[] buf = new byte[256];
+            byte[] buf  = new byte[256];
             int    read = await pipe.ReadAsync(buf, cts.Token);
             string response = Encoding.UTF8.GetString(buf, 0, read).Trim();
 
             bool allowed = string.Equals(response, "ALLOW", StringComparison.OrdinalIgnoreCase);
-            return new TransferResult(req.FilePath, allowed);
+            return new TransferResult(req.FilePath, allowed, null, fileHash);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             TryDeleteTemp(tempPath);
-            return new TransferResult(req.FilePath, false, "Analysis timed out — transfer blocked.");
+            return new TransferResult(req.FilePath, false,
+                "Analysis timed out — transfer blocked.", fileHash);
+        }
+        catch (OperationCanceledException)
+        {
+            TryDeleteTemp(tempPath);
+            throw;   // user-initiated cancel — let TransferForm handle it
         }
         catch (Exception ex)
         {
             TryDeleteTemp(tempPath);
-            return new TransferResult(req.FilePath, false, $"Orchestrator error: {ex.Message}");
+            return new TransferResult(req.FilePath, false,
+                $"Orchestrator error: {ex.Message}", fileHash);
         }
     }
 
