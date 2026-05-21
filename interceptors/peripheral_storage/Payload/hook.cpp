@@ -53,6 +53,7 @@ static HANDLE          g_hLogFile         = INVALID_HANDLE_VALUE;
 // Atomic flag: 0 = not yet hooked / already unhooked, 1 = hooks active.
 static LONG   g_hookActive        = 0;
 static HANDLE g_hReactivateEvent  = NULL;
+static HANDLE g_hSuppressEvent    = NULL;   // Global\UsbDlpSuppress_<pid> — signaled by Controller to soft-bypass this process on demand
 
 // ============================================================
 //  Debug logging  (writes to %TEMP%\UsbDlpPayload.log)
@@ -268,6 +269,10 @@ static bool ShouldBlock(POBJECT_ATTRIBUTES objAttrs, ACCESS_MASK desiredAccess,
     const auto* hdr = static_cast<const SharedHeader*>(g_pView);
     if (hdr->magic != SHM_MAGIC) return g_failClosed;
 
+    // SHM is valid — read fail_closed live so Controller hot-reload takes effect immediately.
+    // g_failClosed remains the fallback only when g_pView is null or magic is bad.
+    bool liveFail = (hdr->fail_closed != 0);
+
     // Fast path: no removable drives in the map
     if (hdr->entry_count == 0) return false;
 
@@ -309,7 +314,7 @@ static bool ShouldBlock(POBJECT_ATTRIBUTES objAttrs, ACCESS_MASK desiredAccess,
 
     // Seqlock read + prefix check
     EntrySnapshot snap;
-    if (!ReadSnapshot(snap)) return g_failClosed;
+    if (!ReadSnapshot(snap)) return liveFail;
 
     return IsRemovablePath(fullPath, fullLen, snap);
 }
@@ -387,15 +392,14 @@ static DWORD WINAPI WatcherThread(LPVOID)
             return 0;
         }
 
-        DlpLog(L"WatcherThread: mutex opened, blocking on WaitForSingleObject...");
-        DWORD waitResult = WaitForSingleObject(hMutex, INFINITE);
+        DlpLog(L"WatcherThread: mutex opened, waiting for alive-mutex or suppress event...");
+        HANDLE waitHandles[2] = { hMutex, g_hSuppressEvent };
+        DWORD  handleCount    = (g_hSuppressEvent != NULL) ? 2 : 1;
+        DWORD  waitResult     = WaitForMultipleObjects(handleCount, waitHandles, FALSE, INFINITE);
         DlpLog(L"WatcherThread: wait returned 0x%08lX, calling HookUninit", waitResult);
-        // Relinquish mutex ownership before closing the handle. Without this, the looping
-        // WatcherThread retains ownership across iterations: the next Controller's
-        // CreateMutexW(bInitialOwner=true) gets ERROR_ALREADY_EXISTS and does not own the
-        // mutex, its ReleaseMutex fails silently, and WatcherThread's next WaitForSingleObject
-        // returns immediately (same thread already owns) — causing the hook to oscillate.
-        if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_ABANDONED)
+        // Only release the mutex if we acquired ownership (first handle signaled).
+        // WAIT_OBJECT_0+1 = suppress event fired; we never acquired the mutex.
+        if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_ABANDONED_0)
             ReleaseMutex(hMutex);
         CloseHandle(hMutex);
 
@@ -498,7 +502,16 @@ void HookInit()
     if (g_hReactivateEvent)
         DlpLog(L"HookInit: reactivate event '%s'", evtName);
     else
-        DlpLog(L"HookInit: CreateEventW failed err=%lu", GetLastError());
+        DlpLog(L"HookInit: reactivate CreateEventW failed err=%lu", GetLastError());
+
+    WCHAR suppressName[64];
+    _snwprintf_s(suppressName, _countof(suppressName), _TRUNCATE,
+                 L"Global\\UsbDlpSuppress_%lu", GetCurrentProcessId());
+    g_hSuppressEvent = CreateEventW(nullptr, FALSE, FALSE, suppressName);
+    if (g_hSuppressEvent)
+        DlpLog(L"HookInit: suppress event '%s'", suppressName);
+    else
+        DlpLog(L"HookInit: suppress CreateEventW failed err=%lu", GetLastError());
 
     // Spawn the watcher thread (detached; manages its own lifetime)
     DWORD watcherTid = 0;

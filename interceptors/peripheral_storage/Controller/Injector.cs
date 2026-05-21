@@ -9,10 +9,16 @@ namespace Controller;
 /// </summary>
 internal sealed class Injector
 {
-    private readonly string _dllPath;
+    private string _dllPath;
 
     public Injector(string dllPath) =>
         _dllPath = Path.GetFullPath(dllPath);
+
+    public void UpdateDllPath(string fullPath)
+    {
+        _dllPath = fullPath;
+        Log.Write($"[Injector] DLL path updated: {_dllPath}");
+    }
 
     public bool Inject(int pid, out int errorCode)
     {

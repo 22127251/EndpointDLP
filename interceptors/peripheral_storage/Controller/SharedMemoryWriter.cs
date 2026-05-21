@@ -135,6 +135,20 @@ internal sealed class SharedMemoryWriter : IDisposable
         Interlocked.Increment(ref hdr->SeqCounter);
     }
 
+    /// <summary>
+    /// Updates the fail_closed flag in the shared memory header.
+    /// Already-injected DLLs read this field live on every ShouldBlock call,
+    /// so they reflect the change immediately without reinitialisation.
+    /// </summary>
+    public unsafe void UpdateFailClosed(bool failClosed)
+    {
+        if (_view == null) return;
+        var hdr = (SharedHeader*)_view;
+        Thread.MemoryBarrier();
+        hdr->FailClosed = failClosed ? 1u : 0u;
+        Thread.MemoryBarrier();
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

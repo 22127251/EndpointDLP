@@ -20,7 +20,7 @@ struct SharedHeader {
     UINT32          version;         // offset  4
     volatile UINT32 seq_counter;     // offset  8  — odd = write in progress
     volatile UINT32 entry_count;     // offset 12
-    UINT32          fail_closed;     // offset 16  — 0 = fail-open
+    volatile UINT32 fail_closed;     // offset 16  — 0 = fail-open; written live by Controller hot-reload
     UINT32          _pad[3];         // offset 20  — align entries to offset 32
 };  // = 32 bytes
 
