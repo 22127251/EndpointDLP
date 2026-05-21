@@ -16,6 +16,8 @@ import time
 from email.parser import BytesHeaderParser
 from urllib.parse import urlparse, parse_qs, unquote
 
+import ctypes
+
 from mitmproxy import http
 
 import pipe_client
@@ -242,7 +244,7 @@ def request(flow: http.HTTPFlow) -> None:
         },
     }
 
-    decision, consumer_received = _consult_policy(payload)
+    decision, consumer_received, reason = _consult_policy(payload)
 
     # Temp file lifecycle: consumer is responsible for cleanup when it received the path.
     # If the consumer never received it (pipe error/timeout), we clean up ourselves.
@@ -252,6 +254,7 @@ def request(flow: http.HTTPFlow) -> None:
     if decision == "BLOCK":
         _cache_blocked_url(flow.request.pretty_url)
         log.info("BLOCK | %s | %d bytes | %s", filename, len(file_body), flow.request.pretty_url)
+        _notify_blocked(filename, reason)
         flow.response = http.Response.make(
             403,
             b"Upload blocked by DLP policy.",
@@ -802,7 +805,7 @@ def _handle_gmail_attachments(flow: http.HTTPFlow) -> None:
             },
         }
 
-        decision, consumer_received = _consult_policy(payload)
+        decision, consumer_received, reason = _consult_policy(payload)
 
         if not consumer_received:
             _delete_temp_file(temp_path)
@@ -811,6 +814,7 @@ def _handle_gmail_attachments(flow: http.HTTPFlow) -> None:
             log.info("BLOCK | Gmail attachment | %s | %d bytes | %s",
                      filename, len(file_body), url[:80])
             _cache_blocked_url(url)
+            _notify_blocked(filename, reason)
             _block_gmail(flow)
             return
         else:
@@ -878,7 +882,7 @@ def _handle_gmail_resumable_upload(flow: http.HTTPFlow) -> None:
         },
     }
 
-    decision, consumer_received = _consult_policy(payload)
+    decision, consumer_received, reason = _consult_policy(payload)
 
     if not consumer_received:
         _delete_temp_file(temp_path)
@@ -887,6 +891,7 @@ def _handle_gmail_resumable_upload(flow: http.HTTPFlow) -> None:
         log.info("BLOCK | Gmail resumable upload | %s | %d bytes | %s",
                  filename, len(body), url[:80])
         _cache_blocked_url(url)
+        _notify_blocked(filename, reason)
         _block_gmail(flow)
     else:
         log.info("ALLOW | Gmail resumable upload | %s | %d bytes | %s",
@@ -982,6 +987,25 @@ def _block_gmail(flow: http.HTTPFlow) -> None:
         b"Attachment blocked by DLP policy.",
         {"Content-Type": "text/plain"},
     )
+
+
+def _notify_blocked(filename: str, reason: str) -> None:
+    """Show a Windows MessageBox when an upload is blocked (runs in a thread to avoid blocking proxy)."""
+    def _show():
+        try:
+            if not reason:
+                msg = f"File: {filename}"
+            else:
+                msg = f"File: {filename}\nReason: {reason}"
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                msg,
+                "Upload Blocked by DLP",
+                0x40 | 0x1000 | 0x40000,  # MB_ICONINFORMATION | MB_SYSTEMMODAL | MB_TOPMOST
+            )
+        except Exception:
+            pass
+    threading.Thread(target=_show, daemon=True).start()
 
 
 def _parse_gmail_attachments(body: bytes, content_type: str) -> list[tuple[str, bytes, str]]:
@@ -1143,17 +1167,17 @@ def _delete_temp_file(path: str) -> None:
 
 def _consult_policy(payload: dict) -> tuple:
     """
-    Returns (decision: str, consumer_received: bool).
+    Returns (decision: str, consumer_received: bool, reason: str).
     consumer_received=True means the consumer got the temp_path and owns cleanup.
     """
     with _upload_lock:
         try:
-            decision = pipe_client.send_and_receive(
+            decision, reason = pipe_client.send_and_receive(
                 payload,
                 _cfg.pipe_name,
                 _cfg.timeout_seconds,
             )
-            return decision, True
+            return decision, True, reason
         except TimeoutError as e:
             log.warning("Pipe timeout: %s → fail_%s", e, _cfg.fail_behavior)
         except OSError as e:
@@ -1161,4 +1185,4 @@ def _consult_policy(payload: dict) -> tuple:
         except Exception as e:
             log.error("Unexpected pipe error: %s → fail_%s", e, _cfg.fail_behavior)
 
-    return ("ALLOW" if _cfg.fail_open() else "BLOCK"), False
+    return ("ALLOW" if _cfg.fail_open() else "BLOCK"), False, "Pipe communication error"

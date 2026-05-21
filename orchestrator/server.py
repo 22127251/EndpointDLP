@@ -132,14 +132,17 @@ class PipeServer:
                   req_id, request.get("channel"), request.get("kind"), size)
 
         try:
-            decision, write_response = self._dispatcher.analyze(request)
+            decision, write_response, reason = self._dispatcher.analyze(request)
         except Exception as exc:
             log.error("Dispatcher error: %s", exc)
-            decision, write_response = "BLOCK", True
+            decision, write_response, reason = "BLOCK", True, "Analysis error"
 
         if write_response:
             try:
-                win32file.WriteFile(handle, decision.encode("utf-8"))
+                response = decision
+                if decision == "BLOCK" and reason:
+                    response = f"BLOCK|{reason}"
+                win32file.WriteFile(handle, response.encode("utf-8"))
                 win32file.FlushFileBuffers(handle)
             except Exception as exc:
                 log.warning("WriteFile failed: %s", exc)

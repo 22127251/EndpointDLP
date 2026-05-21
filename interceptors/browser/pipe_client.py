@@ -2,6 +2,7 @@
 Windows named pipe client.
 
 Sends a JSON payload to the pipe server and reads back "ALLOW" or "BLOCK".
+Optionally returns a reason string when the decision is "BLOCK".
 Raises TimeoutError if no response within timeout_seconds.
 Raises OSError if the pipe cannot be opened (server not running).
 """
@@ -14,9 +15,10 @@ import win32file
 import win32pipe
 
 
-def send_and_receive(payload: dict, pipe_name: str, timeout_seconds: float) -> str:
+def send_and_receive(payload: dict, pipe_name: str, timeout_seconds: float) -> tuple[str, str]:
     """
-    Open the named pipe, send JSON, read response, return "ALLOW" or "BLOCK".
+    Open the named pipe, send JSON, read response, return (decision, reason).
+    decision is "ALLOW" or "BLOCK". reason is non-empty only on BLOCK.
     """
     deadline = time.monotonic() + timeout_seconds
 
@@ -50,12 +52,18 @@ def send_and_receive(payload: dict, pipe_name: str, timeout_seconds: float) -> s
         # instead rely on the server responding within the deadline.
         # ReadFile blocks until data arrives or handle is closed.
         _, response_bytes = win32file.ReadFile(handle, 64 * 1024)
-        response = response_bytes.decode("utf-8").strip().upper()
+        response = response_bytes.decode("utf-8").strip()
 
-        if response not in ("ALLOW", "BLOCK"):
-            raise ValueError(f"Unexpected pipe response: {response!r}")
+        # Parse response: "ALLOW", "BLOCK", or "BLOCK|reason"
+        if response.startswith("BLOCK"):
+            reason = ""
+            if "|" in response:
+                reason = response.split("|", 1)[1]
+            return "BLOCK", reason
+        if response.upper() == "ALLOW":
+            return "ALLOW", ""
 
-        return response
+        raise ValueError(f"Unexpected pipe response: {response!r}")
 
     finally:
         win32file.CloseHandle(handle)

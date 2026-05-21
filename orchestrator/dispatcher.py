@@ -32,23 +32,26 @@ class Dispatcher:
         self._clip_lock = threading.Lock()
         self._clip_inflight: dict[int, threading.Event] = {}  # seq → cancel flag
 
-    def analyze(self, request: dict) -> tuple[str, bool]:
+    def analyze(self, request: dict) -> tuple[str, bool, str]:
         """
         Run analysis for *request* in the appropriate thread pool.
 
         Blocks the calling thread until analysis completes (or times out).
 
-        Returns (decision, write_response):
+        Returns (decision, write_response, reason):
           - decision: "ALLOW" or "BLOCK"
           - write_response: False if this clipboard request was superseded and
             the response should be silently dropped.
+          - reason: human-readable reason for the decision (empty string if ALLOW)
         """
         channel = request.get("channel", "browser")
         if channel == "clipboard":
-            return self._analyze_clipboard(request)
+            decision, write_response = self._analyze_clipboard(request)
+            return decision, write_response, ""
         if channel == "peripheral_storage":
-            return self._analyze_peripheral(request), True
-        return self._analyze_browser(request), True
+            return self._analyze_peripheral(request), True, ""
+        decision, reason = self._analyze_browser(request)
+        return decision, True, reason
 
     def shutdown(self, wait: bool = True) -> None:
         self._clipboard_pool.shutdown(wait=wait)
@@ -57,7 +60,7 @@ class Dispatcher:
 
     # ------------------------------------------------------------------ #
 
-    def _analyze_browser(self, request: dict) -> str:
+    def _analyze_browser(self, request: dict) -> tuple[str, str]:
         req_id = request.get("req_id", "?")
         future = self._browser_pool.submit(
             self._pm.analyze,
@@ -68,16 +71,17 @@ class Dispatcher:
             req_id=req_id,
         )
         try:
-            decision, _violations = future.result(timeout=_ANALYSIS_TIMEOUT)
-            return decision
+            decision, violations = future.result(timeout=_ANALYSIS_TIMEOUT)
+            reason = _format_block_reason(violations) if decision == "BLOCK" else ""
+            return decision, reason
         except FutureTimeoutError:
             log.error("timeout req=%s channel=browser after %.1fs; failing closed",
                       req_id, _ANALYSIS_TIMEOUT)
             future.cancel()
-            return "BLOCK"
+            return "BLOCK", "Analysis timed out"
         except Exception as exc:
             log.error("error req=%s channel=browser: %s", req_id, exc)
-            return "BLOCK"
+            return "BLOCK", "Analysis error"
 
     def _analyze_peripheral(self, request: dict) -> str:
         req_id = request.get("req_id", "?")
@@ -140,3 +144,15 @@ class Dispatcher:
             return decision, False
 
         return decision, True
+
+
+def _format_block_reason(violations: list) -> str:
+    """Format a human-readable block reason from violation policy IDs."""
+    if not violations:
+        return "Sensitive data detected"
+    names = []
+    for v in violations:
+        # Turn "block_visa_browser" into "Visa Card"
+        name = v.policy_id.replace("block_", "").replace("_browser", "").replace("_", " ").title()
+        names.append(name)
+    return "Sensitive data detected: " + ", ".join(names)
