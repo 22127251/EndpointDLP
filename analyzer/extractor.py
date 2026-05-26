@@ -48,7 +48,7 @@ class TabularData:
 # Routing helpers
 # ---------------------------------------------------------------------------
 
-_TABULAR_SUFFIXES = {".tsv", ".xlsx", ".ods", ".docx", ".odt"}
+_TABULAR_SUFFIXES = {".tsv", ".xlsx", ".ods", ".docx", ".odt", ".pdf"}
 
 
 def is_tabular(file_path: str | Path) -> bool:
@@ -178,6 +178,8 @@ def extract_tabular(file_path: str | Path) -> TabularData:
         return _extract_docx_tabular(path)
     if suffix == ".odt":
         return _extract_odt_tabular(path)
+    if suffix == ".pdf":
+        return _extract_pdf_tabular(path)
     # Fallback: treat as single plaintext column
     text = extract_text(path)
     return TabularData(columns=[ColumnBlock(header="", values=text.splitlines(), sheet=None)])
@@ -355,12 +357,137 @@ def _extract_odt_tabular(path: Path) -> TabularData:
                     values.append("")
             columns.append(ColumnBlock(header=header, values=values, sheet=sheet_name))
 
+    # Collect paragraph object IDs that already belong to table cells
+    table_para_ids: set[int] = set()
+    for tbl in doc.body.getElementsByType(Table):
+        for tr in tbl.getElementsByType(TableRow):
+            for cell in tr.getElementsByType(TableCell):
+                for p in cell.getElementsByType(odf_text.P):
+                    table_para_ids.add(id(p))
+
     # Body paragraphs (outside tables)
     body_texts: list[str] = []
     for p in doc.body.getElementsByType(odf_text.P):
-        t = str(p).strip()
-        if t:
-            body_texts.append(t)
+        if id(p) not in table_para_ids:
+            t = str(p).strip()
+            if t:
+                body_texts.append(t)
+    if body_texts:
+        columns.append(ColumnBlock(header="", values=body_texts, sheet=None))
+
+    return TabularData(columns=columns)
+
+
+# ---- PDF (PyMuPDF — tables + body text) ----
+
+def _extract_pdf_tabular(path: Path) -> TabularData:
+    import fitz
+
+    columns: list[ColumnBlock] = []
+    body_texts: list[str] = []
+    # Indices into `columns` and column count of the most recently completed
+    # multi-row table.  Kept outside the page loop so they survive page turns
+    # and can be used to merge 1-row stubs that PyMuPDF creates when a table
+    # row wraps across a page boundary.
+    last_col_indices: list[int] = []
+    last_col_count: int = 0
+
+    with fitz.open(str(path)) as doc:
+        for page_num, page in enumerate(doc):
+            finder = page.find_tables()
+            table_bboxes = [t.bbox for t in finder.tables]
+
+            for table_idx, table in enumerate(finder.tables):
+                rows = table.extract()
+                if not rows:
+                    continue
+
+                if len(rows) == 1:
+                    # PyMuPDF splits a page-spanning table into a normal table on
+                    # page N and a 1-row "stub" table on page N+1.  The normal
+                    # code path would treat that single row as a header with no
+                    # data rows, silently discarding every PII value in it.
+                    # Instead, merge the stub back into the previous table.
+                    stub_row = rows[0]
+                    if last_col_indices and len(stub_row) == last_col_count:
+                        non_empty = sum(
+                            1 for c in stub_row if c is not None and str(c).strip()
+                        )
+                        if non_empty >= (last_col_count + 1) // 2:
+                            # Most cells are populated → the full last row of the
+                            # previous table overflowed to this page.  Append each
+                            # cell as a new data value in its matching column.
+                            for ci, block_idx in enumerate(last_col_indices):
+                                cell = stub_row[ci] if ci < len(stub_row) else None
+                                columns[block_idx].values.append(
+                                    str(cell) if cell is not None else ""
+                                )
+                        else:
+                            # Only a minority of cells have content → just the tail
+                            # of one or more cell values overflowed.  Concatenate
+                            # each non-empty stub cell onto the last value of the
+                            # matching column so the regex sees the complete number
+                            # (e.g. "4111 5555 6666" + "\n7777" → full 16-digit VISA).
+                            for ci, block_idx in enumerate(last_col_indices):
+                                cell = stub_row[ci] if ci < len(stub_row) else None
+                                cell_str = str(cell).strip() if cell is not None else ""
+                                if cell_str:
+                                    if columns[block_idx].values:
+                                        columns[block_idx].values[-1] += "\n" + cell_str
+                                    else:
+                                        columns[block_idx].values.append(cell_str)
+                    continue  # stub handled; skip normal header/data processing
+
+                sheet = f"Page {page_num + 1} Table {table_idx + 1}"
+                raw_headers = [str(c) if c is not None else "" for c in rows[0]]
+                start_idx = len(columns)
+                for col_idx, header in enumerate(raw_headers):
+                    values: list[str] = []
+                    for row in rows[1:]:
+                        cell = row[col_idx] if col_idx < len(row) else None
+                        values.append(str(cell) if cell is not None else "")
+                    columns.append(ColumnBlock(header=header, values=values, sheet=sheet))
+                # Record this table's column range so the next stub can find it.
+                last_col_indices = list(range(start_idx, len(columns)))
+                last_col_count = len(raw_headers)
+
+            # Collect body text at word granularity instead of block granularity.
+            # page.get_text("blocks") can merge a paragraph with an adjacent table
+            # into one oversized block; filtering at block level then discards the
+            # paragraph.  Individual words have tight bboxes so the overlap check
+            # correctly distinguishes table words from paragraph words even when
+            # PyMuPDF assigned them the same block_no.
+            #
+            # word_data: (block_no, line_no) → [(x0, word_text)]
+            #   block_no – PyMuPDF block index on this page
+            #   line_no  – top-to-bottom line counter within that block
+            #   x0       – left edge of the word (used for left-to-right ordering)
+            word_data: dict[tuple[int, int], list[tuple[float, str]]] = {}
+            for word_info in page.get_text("words"):
+                wx0, wy0, wx1, wy1, word_text, block_no, line_no, _ = word_info
+                in_table = any(
+                    not (wx1 <= tb[0] or tb[2] <= wx0 or wy1 <= tb[1] or tb[3] <= wy0)
+                    for tb in table_bboxes
+                )
+                if not in_table:
+                    word_data.setdefault((block_no, line_no), []).append((wx0, word_text))
+
+            block_lines: dict[int, list[tuple[int, str]]] = {}
+            for (block_no, line_no), words in word_data.items():
+                words.sort(key=lambda w: w[0])  # left-to-right within a line
+                block_lines.setdefault(block_no, []).append(
+                    (line_no, " ".join(w[1] for w in words))
+                )
+
+            # Each block becomes one body_texts entry so that context words and
+            # PII values in the same paragraph stay in the same "cell" for the
+            # engine's inline-context matching.
+            for block_no in sorted(block_lines.keys()):
+                lines = sorted(block_lines[block_no], key=lambda x: x[0])
+                block_text = "\n".join(line for _, line in lines).strip()
+                if block_text:
+                    body_texts.append(block_text)
+
     if body_texts:
         columns.append(ColumnBlock(header="", values=body_texts, sheet=None))
 
