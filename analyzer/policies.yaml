@@ -18,7 +18,7 @@ policies:
     context_range: 120
 
   # --- Chặn đưa CCCD vào Browser ---
-  - id: block_cccd_browser
+  - id: block_cccd_all_channels_with_context
     name: Block Vietnamese Citizen ID (CCCD) in Browser
     channels: [browser, clipboard, peripheral_storage]
     action: block
@@ -35,6 +35,16 @@ policies:
       - "số định danh"
       - "định danh cá nhân"
     context_range: 200
+
+  - id: block_cccd_clipboard_no_context
+    name: Block Vietnamese Citizen ID (CCCD) in Clipboard with no Context words
+    channels: [clipboard]
+    action: block
+    type: regex
+    patterns:
+      # CCCD 12 số: mã tỉnh/thành + thế kỷ/giới tính + năm sinh + số ngẫu nhiên
+      - "\\b0[0-9]{2}[0-3][0-9]{8}\\b"
+
 
   # # --- Chặn từ khóa liên quan đến Bí mật / Nội bộ vào Browser ---
   # - id: block_confidential_keywords_browser
