@@ -30,3 +30,4 @@ openpyxl         # .xlsx (MS Excel)
 python-pptx      # .pptx (MS PowerPoint)
 odfpy            # .odt / .ods / .odp (OpenDocument)
 PyMuPDF          # .pdf  (pre-built wheels for Python 3.13 Windows via Stable ABI)
+pymupdf-layout==1.27.2.2  # AI-guided find_tables(); version must match PyMuPDF==1.27.2.2

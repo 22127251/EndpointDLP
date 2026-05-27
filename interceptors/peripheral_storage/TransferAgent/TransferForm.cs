@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Security.Cryptography;
 using System.Windows.Forms;
 
 namespace TransferAgent;
@@ -6,21 +7,28 @@ namespace TransferAgent;
 internal sealed class TransferForm : Form
 {
     // ── layout constants ─────────────────────────────────────────────────────
-    private const int Pad    = 12;
-    private const int BtnH   = 32;
-    private const int BtnW   = 130;
+    private const int Pad  = 12;
+    private const int BtnH = 32;
+    private const int BtnW = 130;
+
+    private enum TransferStatus { Copied, Skipped, Blocked, CopyFailed }
+
+    private record TransferItem(
+        string SourcePath,    // absolute source file path
+        string DestPath,      // absolute destination file path (may be nested inside a folder)
+        string DisplayName,   // relative name shown in ListView, e.g. "Folder\sub\file.txt"
+        long   SizeBytes);
 
     // ── state ────────────────────────────────────────────────────────────────
-    private readonly string[]         _sources;
-    private readonly string           _destFolder;
-    private TransferResult[]?         _results;
-    private CancellationTokenSource   _cts = new();
+    private readonly string[]               _sources;
+    private readonly string                 _destFolder;
+    private          List<TransferItem>     _items = new();
+    private          CancellationTokenSource _cts  = new();
 
-    // ── controls (created once, shown/hidden per stage) ──────────────────────
+    // ── controls ─────────────────────────────────────────────────────────────
     private readonly Label       _lblStatus;
     private readonly ProgressBar _progressBar;
     private readonly ListView    _listView;
-    private readonly Button      _btnTransfer;
     private readonly Button      _btnCancel;
 
     internal TransferForm(string[] sources, string destFolder)
@@ -29,9 +37,10 @@ internal sealed class TransferForm : Form
         _destFolder = destFolder;
 
         Text            = "DLP File Transfer";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox     = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox     = true;
         MinimizeBox     = false;
+        MinimumSize     = new Size(420, 260);
         StartPosition   = FormStartPosition.CenterScreen;
         ClientSize      = new Size(520, 260);
         Font            = new Font("Segoe UI", 9f);
@@ -42,6 +51,7 @@ internal sealed class TransferForm : Form
             AutoSize  = false,
             TextAlign = ContentAlignment.MiddleLeft,
             Bounds    = new Rectangle(Pad, Pad, ClientSize.Width - Pad * 2, 24),
+            Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
 
         // ── indeterminate progress bar ────────────────────────────────────
@@ -49,6 +59,7 @@ internal sealed class TransferForm : Form
         {
             Style  = ProgressBarStyle.Marquee,
             Bounds = new Rectangle(Pad, Pad + 28, ClientSize.Width - Pad * 2, 20),
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
         };
 
         // ── results list view ─────────────────────────────────────────────
@@ -60,35 +71,24 @@ internal sealed class TransferForm : Form
             Bounds        = new Rectangle(Pad, Pad + 28, ClientSize.Width - Pad * 2,
                                           ClientSize.Height - Pad * 3 - BtnH - 28),
             Visible       = false,
+            Anchor        = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom,
         };
         _listView.Columns.Add("File",   260);
         _listView.Columns.Add("Status",  80);
         _listView.Columns.Add("Size",    80);
         _listView.Columns.Add("Note",   -2);
 
-        // ── buttons ───────────────────────────────────────────────────────
+        // ── close / cancel button ─────────────────────────────────────────
         int btnY = ClientSize.Height - Pad - BtnH;
-
-        _btnTransfer = new Button
-        {
-            Text    = "Transfer Allowed Files",
-            Bounds  = new Rectangle(ClientSize.Width - Pad * 2 - BtnW * 2, btnY, BtnW, BtnH),
-            Enabled = false,
-            Visible = false,
-        };
-        _btnTransfer.Click += OnTransferClick;
-
         _btnCancel = new Button
         {
             Text   = "Cancel",
             Bounds = new Rectangle(ClientSize.Width - Pad - BtnW, btnY, BtnW, BtnH),
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
         };
-        _btnCancel.Click += OnCancelClick;
+        _btnCancel.Click += OnCloseClick;
 
-        Controls.AddRange(new Control[]
-        {
-            _lblStatus, _progressBar, _listView, _btnTransfer, _btnCancel,
-        });
+        Controls.AddRange(new Control[] { _lblStatus, _progressBar, _listView, _btnCancel });
     }
 
     // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -96,7 +96,35 @@ internal sealed class TransferForm : Form
     protected override async void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        await RunAnalysisStageAsync();
+
+        _items = ExpandSources(_sources, _destFolder);
+
+        if (_items.Count == 0)
+        {
+            MessageBox.Show("No files found to transfer.", "DLP File Transfer",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Close();
+            return;
+        }
+
+        var conflicts = FindFolderConflicts(_sources, _destFolder);
+        if (conflicts.Count > 0)
+        {
+            string names = string.Join("\n  ", conflicts.Select(c => $"\"{c}\""));
+            var dr = MessageBox.Show(
+                $"The following folder(s) already exist at the destination and will be merged:\n\n  {names}\n\nClick OK to override (merge), or Cancel to abort the transfer.",
+                "Folder Already Exists",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (dr != DialogResult.OK)
+            {
+                Close();
+                return;
+            }
+        }
+
+        await RunAtomicScanTransferAsync();
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
@@ -106,29 +134,150 @@ internal sealed class TransferForm : Form
         base.OnFormClosed(e);
     }
 
-    // ── stage 1: analysis ─────────────────────────────────────────────────────
+    // ── source expansion ──────────────────────────────────────────────────────
 
-    private async Task RunAnalysisStageAsync()
+    private static List<TransferItem> ExpandSources(string[] sources, string destFolder)
     {
-        _lblStatus.Text = $"Analyzing {_sources.Length} file(s) for policy compliance…";
+        var items = new List<TransferItem>();
+        foreach (string src in sources)
+        {
+            if (System.IO.Directory.Exists(src))
+            {
+                string folderName = System.IO.Path.GetFileName(src.TrimEnd('\\', '/'));
+                foreach (string file in System.IO.Directory.EnumerateFiles(
+                             src, "*", System.IO.SearchOption.AllDirectories))
+                {
+                    string rel      = System.IO.Path.GetRelativePath(src, file);
+                    string display  = System.IO.Path.Combine(folderName, rel);
+                    string destPath = System.IO.Path.Combine(destFolder, folderName, rel);
+                    long   size     = 0;
+                    try { size = new System.IO.FileInfo(file).Length; } catch { }
+                    items.Add(new TransferItem(file, destPath, display, size));
+                }
+            }
+            else
+            {
+                string fileName = System.IO.Path.GetFileName(src);
+                string destPath = System.IO.Path.Combine(destFolder, fileName);
+                long   size     = 0;
+                try { size = new System.IO.FileInfo(src).Length; } catch { }
+                items.Add(new TransferItem(src, destPath, fileName, size));
+            }
+        }
+        return items;
+    }
+
+    private static List<string> FindFolderConflicts(string[] sources, string destFolder)
+    {
+        var conflicts = new List<string>();
+        foreach (string src in sources)
+        {
+            if (!System.IO.Directory.Exists(src)) continue;
+            string folderName = System.IO.Path.GetFileName(src.TrimEnd('\\', '/'));
+            if (System.IO.Directory.Exists(System.IO.Path.Combine(destFolder, folderName)))
+                conflicts.Add(folderName);
+        }
+        return conflicts;
+    }
+
+    // ── atomic scan + transfer ────────────────────────────────────────────────
+
+    private async Task RunAtomicScanTransferAsync()
+    {
+        _lblStatus.Text      = $"Scanning and transferring {_items.Count} file(s)…";
+        _progressBar.Style   = ProgressBarStyle.Marquee;
         _progressBar.Visible = true;
         _listView.Visible    = false;
-        _btnTransfer.Visible = false;
 
-        var tasks = _sources.Select(src =>
+        var tasks = _items.Select(async item =>
         {
-            var fi  = new System.IO.FileInfo(src);
             var req = new TransferRequest(
-                src,
-                System.IO.Path.Combine(_destFolder, fi.Name),
-                fi.Name,
-                fi.Exists ? fi.Length : 0L);
-            return OrchestratorClient.AnalyzeAsync(req, _cts.Token);
+                item.SourcePath,
+                item.DestPath,
+                System.IO.Path.GetFileName(item.SourcePath),
+                item.SizeBytes);
+
+            string snapshotPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"dlpsnap_{Guid.NewGuid():N}.tmp");
+
+            try
+            {
+                using var snapshotStream = new System.IO.FileStream(
+                    snapshotPath,
+                    System.IO.FileMode.CreateNew,
+                    System.IO.FileAccess.ReadWrite,
+                    System.IO.FileShare.None,
+                    bufferSize: 81920,
+                    useAsync: true);
+
+                using (var srcStream = System.IO.File.OpenRead(item.SourcePath))
+                    await srcStream.CopyToAsync(snapshotStream, _cts.Token);
+                snapshotStream.Position = 0;
+
+                byte[] hashBytes = await SHA256.HashDataAsync(snapshotStream, _cts.Token);
+                string fileHash  = Convert.ToHexString(hashBytes).ToLowerInvariant();
+                snapshotStream.Position = 0;
+
+                var result = await OrchestratorClient.AnalyzeAsync(
+                    req, snapshotStream, fileHash, _cts.Token);
+
+                if (result.Allowed)
+                {
+                    try
+                    {
+                        // Create parent dirs before writing — handles nested folder structures.
+                        string? parentDir = System.IO.Path.GetDirectoryName(item.DestPath);
+                        if (parentDir is not null)
+                            System.IO.Directory.CreateDirectory(parentDir);
+
+                        snapshotStream.Position = 0;
+                        using var destStream = new System.IO.FileStream(
+                            item.DestPath,
+                            System.IO.FileMode.CreateNew,
+                            System.IO.FileAccess.Write,
+                            System.IO.FileShare.None,
+                            bufferSize: 81920,
+                            useAsync: true);
+                        await snapshotStream.CopyToAsync(destStream, _cts.Token);
+                        NativeMethods.NotifyFileCreated(item.DestPath);
+                        return (result, TransferStatus.Copied, item.DisplayName, item.SizeBytes);
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        return (result with { ErrorMessage = "Destination exists — skipped." },
+                                TransferStatus.Skipped, item.DisplayName, item.SizeBytes);
+                    }
+                    catch (Exception ex)
+                    {
+                        return (result with { ErrorMessage = $"Copy failed: {ex.Message}" },
+                                TransferStatus.CopyFailed, item.DisplayName, item.SizeBytes);
+                    }
+                }
+
+                return (result, TransferStatus.Blocked, item.DisplayName, item.SizeBytes);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (System.IO.FileNotFoundException)
+            {
+                return (new TransferResult(item.SourcePath, false, "Source file removed before transfer."),
+                        TransferStatus.Blocked, item.DisplayName, item.SizeBytes);
+            }
+            catch (Exception ex)
+            {
+                return (new TransferResult(item.SourcePath, false, $"Snapshot error: {ex.Message}"),
+                        TransferStatus.Blocked, item.DisplayName, item.SizeBytes);
+            }
+            finally
+            {
+                try { System.IO.File.Delete(snapshotPath); } catch { }
+            }
         });
 
+        (TransferResult result, TransferStatus status, string displayName, long sizeBytes)[] outcomes;
         try
         {
-            _results = await Task.WhenAll(tasks);
+            outcomes = await Task.WhenAll(tasks);
         }
         catch (OperationCanceledException)
         {
@@ -136,111 +285,63 @@ internal sealed class TransferForm : Form
             return;
         }
 
-        ShowResultsStage();
+        ShowDoneStage(outcomes);
     }
 
-    // ── stage 2: results ──────────────────────────────────────────────────────
+    // ── done stage ────────────────────────────────────────────────────────────
 
-    private void ShowResultsStage()
+    private void ShowDoneStage(
+        (TransferResult result, TransferStatus status, string displayName, long sizeBytes)[] outcomes)
     {
         _progressBar.Visible = false;
         _listView.Visible    = true;
-        _btnTransfer.Visible = true;
+        _btnCancel.Text      = "Close";
 
         _listView.Items.Clear();
-        int allowCount = 0;
+        int copied = 0, skipped = 0, blocked = 0;
 
-        foreach (var r in _results!)
+        foreach (var (result, status, displayName, sizeBytes) in outcomes)
         {
-            var fi   = new System.IO.FileInfo(r.FilePath);
-            var item = new ListViewItem(fi.Name);
-            item.SubItems.Add(r.Allowed ? "ALLOW" : "BLOCK");
-            item.SubItems.Add(fi.Exists ? FormatSize(fi.Length) : "?");
-            item.SubItems.Add(r.ErrorMessage ?? "");
-            item.ForeColor = r.Allowed ? Color.DarkGreen : Color.DarkRed;
-            item.Tag       = r;
+            string statusText = status switch
+            {
+                TransferStatus.Copied     => "TRANSFERRED",
+                TransferStatus.Skipped    => "SKIPPED",
+                TransferStatus.CopyFailed => "FAILED",
+                _                         => "BLOCKED",
+            };
+            Color color = status is TransferStatus.Copied  ? Color.DarkGreen
+                        : status is TransferStatus.Skipped ? Color.DarkOrange
+                        : Color.DarkRed;
+
+            string note = result.ErrorMessage
+                ?? (result.FileHash is not null ? $"sha256:{result.FileHash[..16]}…" : "");
+
+            var item = new ListViewItem(displayName);
+            item.SubItems.Add(statusText);
+            item.SubItems.Add(FormatSize(sizeBytes));
+            item.SubItems.Add(note);
+            item.ForeColor = color;
             _listView.Items.Add(item);
-            if (r.Allowed) allowCount++;
+
+            switch (status)
+            {
+                case TransferStatus.Copied:  copied++;  break;
+                case TransferStatus.Skipped: skipped++; break;
+                default:                     blocked++; break;
+            }
         }
-
-        int blockCount = _results.Length - allowCount;
-        _lblStatus.Text = $"{allowCount} allowed, {blockCount} blocked — ready to transfer.";
-        _btnTransfer.Enabled = allowCount > 0;
-        _btnCancel.Text      = "Close";
-    }
-
-    // ── stage 3: copying ──────────────────────────────────────────────────────
-
-    private async void OnTransferClick(object? sender, EventArgs e)
-    {
-        _btnTransfer.Enabled = false;
-        _btnCancel.Enabled   = false;
-
-        var allowed = _results!.Where(r => r.Allowed).ToArray();
-        _progressBar.Style   = ProgressBarStyle.Blocks;
-        _progressBar.Minimum = 0;
-        _progressBar.Maximum = allowed.Length;
-        _progressBar.Value   = 0;
-        _progressBar.Visible = true;
-        _listView.Visible    = false;
-
-        int copied  = 0;
-        int skipped = 0;
-
-        foreach (var r in allowed)
-        {
-            var fi   = new System.IO.FileInfo(r.FilePath);
-            _lblStatus.Text = $"Copying {fi.Name} ({copied + 1}/{allowed.Length})…";
-            Application.DoEvents();
-
-            try
-            {
-                string destFile = System.IO.Path.Combine(_destFolder, fi.Name);
-                System.IO.File.Copy(r.FilePath, destFile, overwrite: false);
-                NativeMethods.NotifyFileCreated(destFile);
-                copied++;
-            }
-            catch (IOException)
-            {
-                // destination exists — skip rather than overwrite without asking
-                skipped++;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(
-                    $"Failed to copy {fi.Name}:\n{ex.Message}",
-                    "Transfer Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                skipped++;
-            }
-
-            _progressBar.Value++;
-            await Task.Yield();
-        }
-
-        ShowDoneStage(copied, skipped, _results!.Length - allowed.Length);
-    }
-
-    // ── stage 4: done ─────────────────────────────────────────────────────────
-
-    private void ShowDoneStage(int copied, int skipped, int blocked)
-    {
-        _progressBar.Visible  = false;
-        _btnTransfer.Visible  = false;
-        _btnCancel.Text       = "Close";
-        _btnCancel.Enabled    = true;
 
         var parts = new List<string>();
         if (copied  > 0) parts.Add($"{copied} transferred");
-        if (skipped > 0) parts.Add($"{skipped} skipped (already exists)");
-        if (blocked > 0) parts.Add($"{blocked} blocked by policy");
-        _lblStatus.Text = "Transfer complete: " + string.Join(", ", parts) + ".";
+        if (skipped > 0) parts.Add($"{skipped} skipped");
+        if (blocked > 0) parts.Add($"{blocked} blocked");
+        _lblStatus.Text = "Done: " +
+            (parts.Count > 0 ? string.Join(", ", parts) : "nothing to do") + ".";
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    private void OnCancelClick(object? sender, EventArgs e)
+    private void OnCloseClick(object? sender, EventArgs e)
     {
         _cts.Cancel();
         Close();

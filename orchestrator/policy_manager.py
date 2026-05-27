@@ -117,13 +117,7 @@ class PolicyManager:
 
 
 def _fmt_violations(violations: list) -> str:
-    parts = []
-    for v in violations:
-        positions = []
-        for m in v.matches:
-            if m.start is not None:
-                positions.append(f"{m.start}-{m.end}")
-            else:
-                positions.append(f"col={m.column_name} row={m.row}")
-        parts.append(f"{v.policy_id}({v.action})[{','.join(positions)}]")
-    return " ".join(parts)
+    return " ".join(
+        f"{v.policy_id}({v.action})×{len(v.matches)}"
+        for v in violations
+    )

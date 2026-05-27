@@ -195,6 +195,7 @@ class DLPEngine:
         for col in tabular.columns:
             col_text = "\n".join(col.values)
             col_text_lower = col_text.lower()
+            is_body_col = not col.header  # sentinel: body paragraph / plain-text column
 
             # --- RE2 phase: scan per-cell to avoid cross-cell false positives ---
             for cp in self._compiled:
@@ -202,20 +203,36 @@ class DLPEngine:
                     continue
                 policy = cp.policy
 
-                # Column-header context check
-                if policy.context_words and not self._header_matches_context(col.header, policy):
-                    continue
-
-                for row_idx, cell_value in enumerate(col.values):
-                    if not cell_value:
+                if is_body_col:
+                    # Body text column: check context word inline within each cell
+                    for row_idx, cell_value in enumerate(col.values):
+                        if not cell_value:
+                            continue
+                        if policy.context_words:
+                            cell_lower = cell_value.lower()
+                            if not any(cw.lower() in cell_lower for cw in policy.context_words):
+                                continue
+                        for m in cp.pattern.finditer(cell_value):
+                            violations_map.setdefault(policy.id, []).append(Match(
+                                text=cell_value[m.start():m.end()],
+                                column_name=col.header,
+                                row=row_idx + 1,
+                                sheet=col.sheet,
+                            ))
+                else:
+                    # Named column: header-based context matching
+                    if policy.context_words and not self._header_matches_context(col.header, policy):
                         continue
-                    for m in cp.pattern.finditer(cell_value):
-                        violations_map.setdefault(policy.id, []).append(Match(
-                            text=cell_value[m.start():m.end()],
-                            column_name=col.header,
-                            row=row_idx + 1,
-                            sheet=col.sheet,
-                        ))
+                    for row_idx, cell_value in enumerate(col.values):
+                        if not cell_value:
+                            continue
+                        for m in cp.pattern.finditer(cell_value):
+                            violations_map.setdefault(policy.id, []).append(Match(
+                                text=cell_value[m.start():m.end()],
+                                column_name=col.header,
+                                row=row_idx + 1,
+                                sheet=col.sheet,
+                            ))
 
             # --- AC phase: denylist keywords on joined column text ---
             if not self._trie_empty and self._automaton is not None:
@@ -228,9 +245,14 @@ class DLPEngine:
                         policy = self._policy_lookup.get(policy_id)
                         if policy is None or channel not in policy.channels:
                             continue
-                        # Column-header context check
-                        if policy.context_words and not self._header_matches_context(col.header, policy):
-                            continue
+                        if policy.context_words:
+                            if is_body_col:
+                                row_idx = col_text[:start_idx].count("\n")
+                                cell_val = col.values[row_idx] if row_idx < len(col.values) else ""
+                                if not any(cw.lower() in cell_val.lower() for cw in policy.context_words):
+                                    continue
+                            elif not self._header_matches_context(col.header, policy):
+                                continue
                         row = col_text[:start_idx].count("\n") + 1
                         matched_text = col_text[start_idx:end_exc]
                         violations_map.setdefault(policy_id, []).append(Match(
@@ -326,6 +348,8 @@ class DLPEngine:
     def _header_matches_context(header: str, policy: Policy) -> bool:
         """Return True if the column header matches any context word (substring, case-insensitive)."""
         h = header.lower()
+        if not h:
+            return False
         return any(cw.lower() in h or h in cw.lower() for cw in policy.context_words)
 
 

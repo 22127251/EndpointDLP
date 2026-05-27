@@ -63,9 +63,10 @@ Step '3/5  Register CLSID in HKCU (no admin)' {
     Write-Host "     HKCU\Software\Classes\CLSID\$Clsid registered" -ForegroundColor Green
 }
 
-Step '4/5  Register context-menu handler in HKCU (no admin)' {
+Step '4/5  Register context-menu handlers in HKCU (no admin)' {
     RegAdd "HKCU\Software\Classes\*\shellex\ContextMenuHandlers\DLPTransfer" '' $Clsid
-    Write-Host "     HKCU\Software\Classes\*\shellex\ContextMenuHandlers\DLPTransfer set" -ForegroundColor Green
+    RegAdd "HKCU\Software\Classes\Directory\shellex\ContextMenuHandlers\DLPTransfer" '' $Clsid
+    Write-Host "     HKCU\...\* and \Directory context-menu handlers registered" -ForegroundColor Green
 }
 
 Step '5/5  Write agent path to HKCU (no admin)' {
@@ -88,5 +89,6 @@ Next steps:
 To uninstall (also no admin) — paste into PowerShell:
   reg delete "HKCU\Software\Classes\CLSID\$Clsid" /f
   reg delete "HKCU\Software\Classes\*\shellex\ContextMenuHandlers\DLPTransfer" /f
+  reg delete "HKCU\Software\Classes\Directory\shellex\ContextMenuHandlers\DLPTransfer" /f
   reg delete "HKCU\SOFTWARE\DLPAgent" /f
 "@
