@@ -1,0 +1,10 @@
+policies:
+  - id: block_visa_no_context
+    name: Block Visa (test fixture)
+    channels: [browser, clipboard, peripheral_storage]
+    action: block
+    type: regex
+    patterns:
+      - "\\b4[0-9]{3}(?:\\s?[0-9]{4}){3}\\b"
+    context_words: []
+    context_range: 0

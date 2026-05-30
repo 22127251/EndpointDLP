@@ -16,6 +16,9 @@ from orchestrator.config import OrchestratorConfig
 log = logging.getLogger(__name__)
 
 
+_RELOAD_DEBOUNCE_SECONDS = 0.1
+
+
 class _ReloadHandler(FileSystemEventHandler):
     def __init__(self, manager: PolicyManager) -> None:
         self._manager = manager
@@ -23,12 +26,27 @@ class _ReloadHandler(FileSystemEventHandler):
         self._timer: threading.Timer | None = None
 
     def on_modified(self, event) -> None:
-        if Path(event.src_path).name != "policies.yaml":
-            return
+        if Path(event.src_path).name == "policies.yaml":
+            self._schedule_reload()
+
+    def on_moved(self, event) -> None:
+        # Atomic-save editors write to a temp file then rename onto policies.yaml,
+        # which fires on_moved (not on_modified). Without this, hot-reload silently
+        # misses every atomic save.
+        if Path(getattr(event, "dest_path", "")).name == "policies.yaml":
+            self._schedule_reload()
+
+    def on_created(self, event) -> None:
+        if Path(event.src_path).name == "policies.yaml":
+            self._schedule_reload()
+
+    def _schedule_reload(self) -> None:
         with self._lock:
             if self._timer:
                 self._timer.cancel()
-            self._timer = threading.Timer(0.5, self._manager._reload_engine)
+            self._timer = threading.Timer(
+                _RELOAD_DEBOUNCE_SECONDS, self._manager._reload_engine
+            )
             self._timer.daemon = True
             self._timer.start()
 
@@ -39,6 +57,10 @@ class PolicyManager:
         self._policies_file = str(repo_root / config.policies_file)
         log.info("Loading policies from %s", self._policies_file)
         self._engine = DLPEngine(self._policies_file)
+        # Guards both the swap in _reload_engine and the snapshot read in analyze,
+        # so any request whose snapshot is taken AFTER a reload completes is
+        # guaranteed to see the new engine (strict hot-reload bar).
+        self._engine_lock = threading.Lock()
         log.info("DLPEngine ready.")
 
         self._observer = Observer()
@@ -49,15 +71,21 @@ class PolicyManager:
         self._observer.start()
 
     def get_engine(self) -> DLPEngine:
-        return self._engine
+        with self._engine_lock:
+            return self._engine
 
     def _reload_engine(self) -> None:
+        # Construct the new engine OUTSIDE the lock — building a DLPEngine can
+        # take 50–200 ms (YAML parse, regex compile, automaton build) and we
+        # don't want analyze() calls stalled for that long.
         try:
             new_engine = DLPEngine(self._policies_file)
-            self._engine = new_engine  # atomic in CPython (GIL)
-            log.info("Policies reloaded from %s", self._policies_file)
         except Exception as exc:
             log.error("Policy reload failed, keeping old engine: %s", exc)
+            return
+        with self._engine_lock:
+            self._engine = new_engine
+        log.info("Policies reloaded from %s", self._policies_file)
 
     def stop(self) -> None:
         self._observer.stop()
@@ -71,7 +99,8 @@ class PolicyManager:
         file_path: str | None = None,
         req_id: str = "",
     ) -> tuple[str, list]:
-        engine = self._engine  # snapshot before any reload can swap it
+        with self._engine_lock:
+            engine = self._engine  # snapshot — lock release/acquire orders strictly against reload
         if kind == "text":
             body = text or ""
             result = engine.analyze(body, channel)
