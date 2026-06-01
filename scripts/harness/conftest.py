@@ -139,8 +139,32 @@ def make_orchestrator():
             },
             "proxy": {"listen_port": 8080, "bypass": "localhost;127.0.0.1;<local>"},
             "policies_file": str(policies_path),
+            # Phase B per-component sections — minimal values; tests don't need
+            # the full browser allow/block lists. The orchestrator just relays
+            # these over the ctl-pipe; it doesn't consume them itself.
+            "clipboard": {"pipe_timeout_ms": 6000},
+            "browser": {
+                "pipe_timeout_seconds": 5,
+                "fail_behavior": "block",
+                "temp_dir": "",
+                "min_upload_size_bytes": 1024,
+                "domain_blocklist": [],
+                "upload_url_keywords": ["upload"],
+                "extensions": [],
+                "mime_types": [],
+            },
+            "peripheral_storage": {
+                "target_processes": ["explorer.exe"],
+                "fail_mode": "open",
+                "shared_memory_name": f"UsbDlpDriveMap_{run_id}",
+                "payload_dll_path": "Payload.dll",
+                "transfer_agent": {
+                    "connect_timeout_ms": 5000,
+                    "analysis_timeout_seconds": 10,
+                },
+            },
         }
-        config_path = tmp_dir / "orchestrator.yaml"
+        config_path = tmp_dir / "config.yaml"
         config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
         env = os.environ.copy()

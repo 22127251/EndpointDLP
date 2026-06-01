@@ -18,10 +18,17 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 import ctypes
 
-from mitmproxy import http
+from mitmproxy import http, ctx
 
 import pipe_client
-from config import Config, load_config
+from config import (
+    Config,
+    ConfigNotFoundError,
+    config_from_ctl_payload,
+    find_config_yaml,
+    load_config,
+)
+from ctl_pipe_subscriber import CtlPipeSubscriber
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +95,12 @@ def _detect_office_type_from_zip(body: bytes) -> str:
     return ".zip"  # Generic ZIP fallback
 
 _upload_lock = threading.Lock()
+# _cfg is hot-reloaded by the ctl-pipe subscriber thread; _cfg_lock guards the
+# atomic swap so hooks never observe a half-built Config. Per-attribute reads
+# in hooks still go through `_cfg.x` directly (CPython's GIL keeps them atomic).
+_cfg_lock = threading.Lock()
 _cfg: Config = Config()
+_ctl_subscriber: CtlPipeSubscriber | None = None
 
 # Resumable upload tracking:
 # Step 1 POST (metadata) → _pending_resumable[id(flow)] = filename
@@ -105,21 +117,99 @@ _BLOCK_CACHE_TTL = 60.0                 # seconds
 
 
 def load(loader):
-    global _cfg
-    _cfg = load_config(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml"))
+    global _cfg, _ctl_subscriber
+    loader.add_option(
+        "dlp_config_path", str, "",
+        "Absolute path to the central config.yaml. Overrides DLP_CONFIG_PATH.",
+    )
+
+
+def running():
+    """mitmproxy hook fired after options are bound — resolve config + spin up subscriber.
+
+    We do this here (not in load) because ctx.options.dlp_config_path is only
+    populated after option binding completes.
+    """
+    global _cfg, _ctl_subscriber
+    try:
+        config_path = _resolve_config_path()
+    except ConfigNotFoundError as exc:
+        log.error("DLP addon: %s", exc)
+        return
+
+    try:
+        new_cfg = load_config(config_path)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("DLP addon: failed to parse %s: %s", config_path, exc)
+        return
+
+    with _cfg_lock:
+        _cfg = new_cfg
+
     tmp = _cfg.resolved_temp_dir()
     try:
         os.makedirs(tmp, exist_ok=True)
     except OSError as e:
         log.error("Cannot create temp dir %s: %s", tmp, e)
     log.info(
-        "DLP addon loaded | pipe=%s timeout=%ss fail=%s temp=%s extensions=%s keywords=%s",
+        "DLP addon loaded | source=%s pipe=%s timeout=%ss fail=%s temp=%s extensions=%s keywords=%s",
+        config_path,
         _cfg.pipe_name,
         _cfg.timeout_seconds,
         _cfg.fail_behavior,
         tmp,
         _cfg.extensions or "(all)",
         _cfg.upload_url_keywords,
+    )
+
+    # Wire the ctl-pipe subscriber. It reads the orchestrator's ctl pipe name
+    # from the same yaml the addon just loaded.
+    try:
+        import yaml as _yaml
+        with open(config_path, "r", encoding="utf-8") as f:
+            ctl_pipe = (_yaml.safe_load(f) or {}).get("ctl_pipe", "")
+    except Exception:  # noqa: BLE001
+        ctl_pipe = ""
+    if not ctl_pipe:
+        log.warning("DLP addon: no ctl_pipe in config — running without hot reload")
+        return
+
+    _ctl_subscriber = CtlPipeSubscriber(ctl_pipe, "browser", _apply_ctl_update)
+    _ctl_subscriber.start()
+
+
+def done():
+    """mitmproxy shutdown hook — stop the subscriber thread."""
+    global _ctl_subscriber
+    if _ctl_subscriber is not None:
+        _ctl_subscriber.stop()
+        _ctl_subscriber = None
+
+
+def _resolve_config_path() -> str:
+    """Mitmproxy option → env var → walk-up."""
+    opt = (ctx.options.dlp_config_path or "").strip() if hasattr(ctx, "options") else ""
+    if opt:
+        if not os.path.exists(opt):
+            raise ConfigNotFoundError(f"--set dlp_config_path={opt!r} does not exist")
+        return opt
+    env = os.environ.get("DLP_CONFIG_PATH", "").strip()
+    if env:
+        if not os.path.exists(env):
+            raise ConfigNotFoundError(f"DLP_CONFIG_PATH={env!r} does not exist")
+        return env
+    return find_config_yaml()
+
+
+def _apply_ctl_update(payload: dict) -> None:
+    """ctl-pipe subscriber callback. Builds a fresh Config and swaps under lock."""
+    global _cfg
+    new_cfg = config_from_ctl_payload(payload, current_pipe_name=_cfg.pipe_name)
+    with _cfg_lock:
+        _cfg = new_cfg
+    log.info(
+        "ctl: config_update applied | fail=%s timeout=%ss pipe=%s",
+        _cfg.fail_behavior, _cfg.timeout_seconds, _cfg.pipe_name,
     )
 
 

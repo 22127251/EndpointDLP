@@ -14,4 +14,25 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- DlpShared provides ConfigLocator. TransferAgent does NOT use
+         CtlPipeSubscriber — it's a per-file process and reads the central
+         config once at startup. -->
+    <ProjectReference Include="..\..\..\src\DlpShared\DlpShared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Post-impl fix #3: include the central config.yaml in build + publish
+         output so the published TransferAgent (launched by ShellExtension from
+         a deep publish\ dir) finds it via ConfigLocator's walk-up at level 0.
+         <Link> places the file at the output root (without it, MSBuild would
+         try to preserve the ..\..\..\..\ source-path layout under the output
+         dir, which is wrong). PreserveNewest avoids needless re-copy. -->
+    <Content Include="..\..\..\config.yaml">
+      <Link>config.yaml</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

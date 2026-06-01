@@ -15,6 +15,29 @@
   <ItemGroup>
     <PackageReference Include="YamlDotNet" Version="17.0.1" />
     <PackageReference Include="System.Management" Version="10.0.7" />
+    <!-- DlpShared provides ConfigLocator + CtlPipeSubscriber. The cross-tree
+         reference (peripheral_storage → src) is intentional: DlpShared is the
+         shared Phase B library by purpose. -->
+    <ProjectReference Include="..\..\..\src\DlpShared\DlpShared.csproj" />
   </ItemGroup>
+
+  <!-- Post-impl fix #2: copy Payload.dll next to UsbDlpController.exe so that
+       the runtime path resolved from config.yaml (payload_dll_path: Payload.dll
+       relative to AppContext.BaseDirectory) lands on a real file. Payload is a
+       separate .vcxproj built with msbuild; this target only copies, it does
+       NOT trigger the C++ build (deliberate — keeps the C# / C++ toolchains
+       independent per project policy). Warns rather than fails if the source
+       is missing so a C#-only iteration build still completes. -->
+  <Target Name="CopyPayloadDll" AfterTargets="Build">
+    <PropertyGroup>
+      <PayloadDllSource>$(MSBuildThisFileDirectory)..\Payload\x64\$(Configuration)\Payload.dll</PayloadDllSource>
+    </PropertyGroup>
+    <Copy SourceFiles="$(PayloadDllSource)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(PayloadDllSource)')" />
+    <Warning Text="Payload.dll not found at $(PayloadDllSource). Controller will fail to inject at runtime. Build the Payload C++ project first: msbuild interceptors\peripheral_storage\Payload\Payload.vcxproj /p:Configuration=$(Configuration) /p:Platform=x64"
+             Condition="!Exists('$(PayloadDllSource)')" />
+  </Target>
 
 </Project>

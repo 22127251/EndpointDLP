@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -26,11 +26,16 @@ class OrchestratorConfig:
     proxy_listen_port: int
     proxy_bypass: str
     policies_file: str
+    # Whole parsed yaml. Only the ctl-pipe broadcaster reads this — every other
+    # orchestrator module reads the flat fields above. Keeping the raw tree lets
+    # us project per-component sections (clipboard / browser / peripheral_storage)
+    # over the ctl-pipe without re-parsing the file on every change.
+    raw: dict = field(default_factory=dict)
 
 
 def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     if path is None:
-        path = Path(__file__).parent.parent / "orchestrator.yaml"
+        path = Path(__file__).parent.parent / "config.yaml"
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
@@ -59,4 +64,5 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         proxy_listen_port=proxy.get("listen_port", 8080),
         proxy_bypass=proxy.get("bypass", "localhost;127.0.0.1;<local>"),
         policies_file=raw.get("policies_file", "analyzer/policies.yaml"),
+        raw=raw,
     )

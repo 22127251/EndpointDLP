@@ -1,19 +1,38 @@
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
+using DlpShared;
 
 namespace AgentCore;
 
 public class PipeAgentCore : IAgentCore
 {
     private const int MaxContentBytes = 1048576;
-    private readonly string _pipeName;
-    private readonly int _timeoutMs;
+    // Either _provider is null (literal-value ctor was used) or it is set
+    // (provider ctor used). Provider is read once per AnalyseAsync so that
+    // connect, write, and read of a single request all see the same pair —
+    // a mid-flight ctl-push that changes the timeout doesn't split the call.
+    private readonly Func<(string PipeName, int TimeoutMs)>? _provider;
+    private readonly string _constantPipeName;
+    private readonly int _constantTimeoutMs;
 
     public PipeAgentCore(string pipeName = "dlp_agent", int timeoutMs = 6000)
     {
-        _pipeName = pipeName;
-        _timeoutMs = timeoutMs;
+        _constantPipeName = pipeName;
+        _constantTimeoutMs = timeoutMs;
+        _provider = null;
+    }
+
+    /// <summary>
+    /// Provider-form ctor: ClipboardInterceptor passes a closure over a
+    /// thread-safe ConfigHolder so hot-reloaded timeouts take effect on the
+    /// next AnalyseAsync call without re-instantiating PipeAgentCore.
+    /// </summary>
+    public PipeAgentCore(Func<(string PipeName, int TimeoutMs)> provider)
+    {
+        _provider = provider;
+        _constantPipeName = "";
+        _constantTimeoutMs = 0;
     }
 
     public async Task<AnalysisDecision> AnalyseAsync(string content, CancellationToken ct = default)
@@ -21,18 +40,20 @@ public class PipeAgentCore : IAgentCore
         if (Encoding.UTF8.GetByteCount(content) > MaxContentBytes)
             return AnalysisDecision.Block;
 
+        var (pipeName, timeoutMs) = _provider?.Invoke() ?? (_constantPipeName, _constantTimeoutMs);
+
         // Overall deadline that covers connect + write + read. Without this,
         // ReadAsync after a successful connect could block indefinitely if the
         // orchestrator never writes a response.
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(_timeoutMs);
+        cts.CancelAfter(timeoutMs);
 
         try
         {
-            using var pipe = new NamedPipeClientStream(".", _pipeName,
+            using var pipe = new NamedPipeClientStream(".", PipeNameHelper.ToBareName(pipeName),
                 PipeDirection.InOut, PipeOptions.Asynchronous);
 
-            await pipe.ConnectAsync(_timeoutMs, cts.Token);
+            await pipe.ConnectAsync(timeoutMs, cts.Token);
             pipe.ReadMode = PipeTransmissionMode.Message;
 
             var request = new

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using DlpShared;
 
 namespace TransferAgent;
 
@@ -18,11 +19,40 @@ internal sealed record TransferResult(
     string? ErrorMessage = null,
     string? FileHash     = null);   // SHA-256 hex of snapshot (audit trail)
 
+internal sealed class TransferAgentSection
+{
+    public int ConnectTimeoutMs       { get; set; } = 5_000;
+    public int AnalysisTimeoutSeconds { get; set; } = 10;
+}
+
+internal sealed class PeripheralStorageSection
+{
+    public TransferAgentSection TransferAgent { get; set; } = new();
+}
+
 internal static class OrchestratorClient
 {
-    private const string PipeName         = "dlp_agent";
-    private const int    ConnectTimeoutMs = 5_000;
-    private const int    AnalysisTimeoutS = 10;
+    // Defaults match the legacy hardcoded constants; LoadConfig() at startup
+    // replaces them with values read from the central config.yaml.
+    internal static string PipeName         = "dlp_agent";
+    internal static int    ConnectTimeoutMs = 5_000;
+    internal static int    AnalysisTimeoutS = 10;
+
+    /// <summary>
+    /// One-shot disk read of the central config. Called once from Program.Main
+    /// before Application.Run. TransferAgent is short-lived (per-file launched
+    /// by ShellExtension) and intentionally does NOT subscribe to the ctl-pipe.
+    /// </summary>
+    internal static void LoadConfig()
+    {
+        var yamlPath = ConfigLocator.FindConfigYaml();
+        var (dataPipe, _) = ConfigLocator.LoadTopLevel(yamlPath);
+        var peripheral = ConfigLocator.LoadSection<PeripheralStorageSection>(yamlPath, "peripheral_storage");
+
+        PipeName         = string.IsNullOrEmpty(dataPipe) ? PipeName : PipeNameHelper.ToBareName(dataPipe);
+        ConnectTimeoutMs = peripheral.TransferAgent.ConnectTimeoutMs;
+        AnalysisTimeoutS = peripheral.TransferAgent.AnalysisTimeoutSeconds;
+    }
 
     private static readonly JsonSerializerOptions s_jsonOpts = new()
     {

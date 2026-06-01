@@ -6,7 +6,7 @@ The original integration plan at `D:\Code\GithubPublishEndpointDLP\integration-p
 
 1. **Phases 0–2 of the original plan are largely implemented in code** but only partially verified end-to-end. The user has identified four specific gaps that need validation: multi-instance pipe concurrency, policy hot-reload under load, dispatcher fail-closed timeout, and clipboard supersession edge cases.
 2. **A fourth interceptor — peripheral_storage — has been added** with four sub-components (Controller in C#, Payload C++ DLL, ShellExtension C++ COM, TransferAgent C# WinForms). The original plan explicitly carved this channel out as "stays a stub". It is no longer a stub.
-3. **The orchestrator's dispatcher already routes a `peripheral_storage` channel** (`orchestrator/dispatcher.py:51,86–106`) and TransferAgent already speaks the right wire protocol (`interceptors/peripheral_storage/TransferAgent/OrchestratorClient.cs`). The IPC bridge is in place, but nothing supervises Controller, no unified install exists, and the Controller's own `config.yaml` lives separately from `orchestrator.yaml`.
+3. **The orchestrator's dispatcher already routes a `peripheral_storage` channel** (`orchestrator/dispatcher.py:51,86–106`) and TransferAgent already speaks the right wire protocol (`interceptors/peripheral_storage/TransferAgent/OrchestratorClient.cs`). The IPC bridge is in place; Phase B unified all non-policy configuration into a single `config.yaml` at the repo root (renamed from `orchestrator.yaml`) that every component reads via `DlpShared.ConfigLocator`. Nothing supervises Controller yet (Phase C) and no unified install exists yet (Phase D).
 4. **Phases 3–5 of the original plan (installer, LocalSystem service, session-aware spawning, admin control) are still 1-line stubs** in `orchestrator/`.
 
 This re-plan supersedes the original plan from Phase 2 onward. It is structured as a high-level phase list; **each phase will be planned in detail in a separate follow-up session**, so this file intentionally stays brief on per-step work and explicitly omits test/verification steps (per user instruction — they would be inaccurate at this resolution).
@@ -18,29 +18,33 @@ This re-plan supersedes the original plan from Phase 2 onward. It is structured 
 | 1 | Orchestrator supervises Controller.exe (alongside mitmdump and ClipboardInterceptor.exe). |
 | 2 | All four Phase-2 gaps (multi-instance, hot-reload, timeout, supersession) must be validated and fixed before adding new functionality. |
 | 3 | Scope: full re-plan from current state forward. Original Phase 3/4/5 are reorganized to absorb peripheral_storage. |
-| 4 | Configuration: single `orchestrator.yaml` with named sections. Each section is clearly labelled so it is obvious which component a setting belongs to. **`analyzer/policies.yaml` stays separate** (policy ≠ config). |
+| 4 | Configuration: single `config.yaml` (renamed from `orchestrator.yaml` during Phase B implementation) with named sections. Each section is clearly labelled so it is obvious which component a setting belongs to. **`analyzer/policies.yaml` stays separate** (policy ≠ config). |
 | 5 | Orchestrator installer handles ShellExtension registration; the current `interceptors/peripheral_storage/verify-install.ps1` is replaced by the orchestrator's installer flow. |
 | 6 | Process context for Controller and TransferAgent under a LocalSystem service is an **open question to investigate in Phase E**, not a pre-committed design. |
 
 ## Current state snapshot
 
-**Implemented and roughly working** (Phase 0–2 of old plan):
+**Implemented and roughly working** (Phase 0–2 of old plan, Phase A, **and Phase B**):
 - `orchestrator/server.py` — multi-instance pipe server, accepts JSON, dispatches, writes response in accept thread.
 - `orchestrator/dispatcher.py` — three per-channel `ThreadPoolExecutor`s (clipboard/browser/peripheral), 4 s timeout fail-closed, clipboard supersession via `_clip_seq` / `_clip_inflight`.
-- `orchestrator/policy_manager.py` — `DLPEngine` wrapper, `watchdog` hot-reload with 500 ms debounce, snapshot-on-entry for in-flight calls.
-- `orchestrator/config.py` — dataclass loader for `orchestrator.yaml` (already has `peripheral_storage_workers` field).
+- `orchestrator/policy_manager.py` — `DLPEngine` wrapper, `watchdog` hot-reload with 100 ms debounce + on_modified/on_moved/on_created handlers, lock-guarded snapshot-on-entry (strict bar).
+- `orchestrator/config.py` — dataclass loader for the central `config.yaml`; carries the raw parsed tree on `OrchestratorConfig.raw` for the ctl-pipe broadcaster.
 - `orchestrator/logging_setup.py` — rotating file + console.
-- `orchestrator/__main__.py` — only `--foreground` is implemented; other subcommands print "not implemented".
-- `interceptors/browser/addon.py` + `pipe_client.py` — moved into `interceptors/browser/`, payload shape matches `{channel:"browser", kind:"file", file_path, metadata}`.
-- `src/AgentCore/PipeAgentCore.cs` — real pipe client; sends `{channel:"clipboard", kind:"text", text, metadata}`; fail-closed on any exception.
-- `src/ClipboardInterceptor/ClipboardHistoryEnforcer.cs` — NEW: keeps Windows clipboard history disabled via `RegNotifyChangeKeyValue`.
-- `analyzer/cli_extractor.py` — NEW: standalone CLI for file-text extraction.
+- `orchestrator/__main__.py` — `--foreground` wires PipeServer + CtlServer + ConfigWatcher; selective-skip of non-hot-reloadable `data_pipe` / `ctl_pipe` lives here. Other subcommands print "not implemented".
+- `orchestrator/ctl_server.py` — **NEW (Phase B):** single-instance ctl-pipe server, rejects duplicate subscribes with `already_subscribed`, projects per-component sections from raw config, push delivery with 500 ms write deadline.
+- `orchestrator/config_watcher.py` — **NEW (Phase B):** watchdog-based FileSystemWatcher on `config.yaml`, 200 ms debounce, parses + invokes on_change callback.
+- `interceptors/browser/addon.py` + `pipe_client.py` + `config.py` + `ctl_pipe_subscriber.py` — addon reads central `config.yaml` (via `DLP_CONFIG_PATH` env var → walk-up + sentinel), subscribes to ctl-pipe for live config updates.
+- `src/AgentCore/PipeAgentCore.cs` — real pipe client; supports a `Func<(string, int)>` provider for hot-reloadable timeout; fail-closed on any exception.
+- `src/ClipboardInterceptor/ClipboardHistoryEnforcer.cs` — keeps Windows clipboard history disabled via `RegNotifyChangeKeyValue`.
+- `src/ClipboardInterceptor/Program.cs` + `ClipboardConfigHolder.cs` — reads central `config.yaml` via `DlpShared.ConfigLocator`, subscribes to ctl-pipe.
+- `src/DlpShared/` — **NEW (Phase B):** shared C# library with `ConfigLocator` (env var → walk-up N=8 + sentinel check) and `CtlPipeSubscriber` (long-lived message-mode subscriber, exponential-backoff reconnect, handles `already_subscribed` retryably).
+- `analyzer/cli_extractor.py` — standalone CLI for file-text extraction.
 
-**Peripheral_storage components (new, partially integrated):**
-- `interceptors/peripheral_storage/Controller/Program.cs` — console app; loads its own `config.yaml`; manages `SharedMemoryWriter`, `AliveMutex`, `DriveMonitor`, `ProcessMonitor`; hot-reloads on `config.yaml` change; writes `running-config.yaml` for diagnostics.
+**Peripheral_storage components (Phase B integrated):**
+- `interceptors/peripheral_storage/Controller/Program.cs` + `Config/AppConfig.cs` — Controller now reads the central `config.yaml`'s `peripheral_storage` section via `DlpShared.ConfigLocator`. The legacy FileSystemWatcher is replaced by a `CtlPipeSubscriber`; the existing selective-update logic in `TryReload(AppConfig)` (target_processes / fail_mode / payload_dll_path / `shared_memory_name` rejection) is preserved. `running-config.yaml` is retained as an audit-trail artifact.
 - `interceptors/peripheral_storage/Payload/{dllmain,hook}.cpp` — injected DLL that hooks `NtCreateFile`; reads removable-drive seqlock from `Global\UsbDlpDriveMap`; deactivates on `AliveMutex` release.
 - `interceptors/peripheral_storage/ShellExtension/DlpContextMenu.cpp` — COM context-menu handler ("Transfer to USB (DLP Protected)") that reads `HKCU\Software\DLPAgent\TransferAgentPath` and launches TransferAgent with `--dest <drive> <files...>`.
-- `interceptors/peripheral_storage/TransferAgent/OrchestratorClient.cs` — connects to `\\.\pipe\dlp_agent`, sends the right `{channel:"peripheral_storage", kind:"file", file_path, metadata:{filename, size_bytes, destination, timestamp}}` payload.
+- `interceptors/peripheral_storage/TransferAgent/OrchestratorClient.cs` + `Program.cs` — TransferAgent now reads central `config.yaml` at startup via `DlpShared.ConfigLocator` (one-shot disk read; intentionally does NOT subscribe to ctl-pipe given its per-file lifecycle). Sends the same `{channel:"peripheral_storage", kind:"file", ...}` payload as before.
 - `interceptors/peripheral_storage/verify-install.ps1` — current install path: HKCU CLSID + context-menu handler + agent-path registration. **No-admin install** — useful as a reference but slated to be replaced by the orchestrator's installer in Phase D.
 
 **Stubs (1-line docstrings only):**
@@ -49,12 +53,15 @@ This re-plan supersedes the original plan from Phase 2 onward. It is structured 
 ## Critical files referenced throughout this plan
 
 - `orchestrator/server.py`, `orchestrator/dispatcher.py`, `orchestrator/policy_manager.py`, `orchestrator/config.py`
+- `orchestrator/ctl_server.py`, `orchestrator/config_watcher.py` (Phase B)
 - `orchestrator/supervisor.py` (to-build), `orchestrator/installer.py` (to-build), `orchestrator/service.py` (to-build), `orchestrator/session.py` (to-build)
-- `interceptors/peripheral_storage/Controller/Program.cs`, `Controller/Config/AppConfig.cs`, `Controller/Config/config.yaml`
+- `src/DlpShared/ConfigLocator.cs`, `src/DlpShared/CtlPipeSubscriber.cs` (Phase B; referenced by AgentCore, Controller, TransferAgent)
+- `interceptors/peripheral_storage/Controller/Program.cs`, `Controller/Config/AppConfig.cs` (reads `peripheral_storage` section of the central `config.yaml`)
 - `interceptors/peripheral_storage/TransferAgent/OrchestratorClient.cs`, `TransferAgent/Program.cs`
 - `interceptors/peripheral_storage/ShellExtension/DlpContextMenu.cpp`, `ShellExtension/DlpContextMenu.h` (CLSID lives here)
 - `interceptors/peripheral_storage/verify-install.ps1`
-- `orchestrator.yaml`, `analyzer/policies.yaml`
+- `interceptors/browser/config.py`, `interceptors/browser/ctl_pipe_subscriber.py` (Phase B; addon reads central `config.yaml`)
+- `config.yaml` (central, at repo root; renamed from `orchestrator.yaml` in Phase B), `analyzer/policies.yaml`
 
 ---
 
@@ -72,18 +79,20 @@ This re-plan supersedes the original plan from Phase 2 onward. It is structured 
 
 **Done when:** all four gaps reproduce reliably under the harness and the orchestrator returns correct decisions / drops superseded responses without partial writes or deadlocks.
 
-### Phase B — Unify configuration into a single sectioned `orchestrator.yaml`
+### Phase B — Unify configuration into a single sectioned `config.yaml` ✅ COMPLETED
 
-**Goal:** all non-policy configuration moves into one sectioned `orchestrator.yaml`; each component reads only its labelled section.
+**Goal (achieved):** all non-policy configuration lives in one sectioned `config.yaml` at the repo root; each component reads only its labelled section. `analyzer/policies.yaml` stays separate (policy ≠ config).
 
-**Scope of follow-up planning session:**
-- Final schema for `orchestrator.yaml`. Sketched sections: `data_pipe`, `ctl_pipe`, `pools`, `limits`, `supervisor`, `paths` (with `mitmdump_exe`, `controller_exe`, `payload_dll_path`, `clipboard_exe`, `transfer_agent_exe`, `shell_extension_dll`), `proxy`, `peripheral_storage` (with `target_processes`, `fail_mode`, `shared_memory_name`, `payload_dll_path`), `policies_file`.
-- How Controller consumes its slice: either (a) Controller continues to read its own `config.yaml`, but `config.yaml` is now generated/synced from `orchestrator.yaml` at install time and on reload; or (b) Controller is taught to read directly from `orchestrator.yaml` and pluck its section. Pick one in the follow-up session.
-- Migration of `interceptors/peripheral_storage/Controller/Config/AppConfig.cs` field mapping.
-- Whether Controller's existing hot-reload (via `FileSystemWatcher` on `config.yaml`, `Controller/Program.cs:156–167`) keeps working independently or piggybacks on the orchestrator-driven reload.
-- Whether `orchestrator.yaml` lives at repo root (current) or moves to a versioned location under `%PROGRAMDATA%\DLP\` once the installer is built.
+**Outcomes (locked decisions from the follow-up Phase B planning session):**
+- Central file is **`config.yaml`** (renamed from `orchestrator.yaml`). Walk-up discovery (`DLP_CONFIG_PATH` env var → walk up N=8 from the executable) **requires the candidate file to contain a top-level `data_pipe:` key (the sentinel)** so a stray unrelated `config.yaml` cannot shadow it.
+- **Controller, ClipboardInterceptor, browser addon, TransferAgent all read `config.yaml` directly** at startup. No installer-synced shadow files. The legacy `interceptors/browser/config.yaml` and `interceptors/peripheral_storage/Controller/Config/config.yaml` are deleted.
+- **Hot-reload is centralised** via a new ctl-pipe push protocol (`\\.\pipe\dlp_agent_ctl`). Orchestrator owns a `FileSystemWatcher` on `config.yaml` and pushes per-component section updates to each subscribed client. Controller, ClipboardInterceptor, and the browser addon subscribe; TransferAgent does NOT subscribe (per-file lifecycle, one-shot read).
+- **`data_pipe` and `ctl_pipe` are non-hot-reloadable at the field level**: if a yaml save touches them, the orchestrator logs `"<field> change requires restart; keeping <old>"`, overrides them back to the in-use values in the broadcast payload, and **still propagates the other fields** in the same save (same pattern as Controller's existing `shared_memory_name` rejection).
+- **Subscriber registry is `dict[str, Handle]` (single-instance per component).** Duplicate subscribes get `{"type":"error","code":"already_subscribed"}` and connection-close, which loudly catches duplicate-launch dev mistakes. Reconnect-after-pipe-break self-resolves via worker-thread EOF cleanup.
+- Shared C# code lives in `src/DlpShared/` (a new project). `AgentCore`, `Controller`, and `TransferAgent` all `<ProjectReference>` it. `PipeAgentCore` gained a `Func<(string, int)>` provider constructor overload so hot-reloadable timeouts take effect on the next `AnalyseAsync` without re-instantiating.
+- Schema sketched in the old plan got slimmed: `paths.controller_exe / transfer_agent_exe / shell_extension_dll / payload_dll` are NOT in `config.yaml` yet — they'll be added in Phase C (supervisor needs them) and Phase D (installer needs them). The `peripheral_storage:` section has the Controller fields at its top level and a nested `transfer_agent:` subsection with the two TransferAgent timeouts.
 
-**Done when:** every component reads its config from the unified file; Controller and orchestrator both hot-reload sanely; no settings duplicated across files.
+**Verification (all green):** `scripts/harness/test_ctl_pipe.py` exercises the snapshot path and a selective-skip end-to-end (one non-hot-reloadable + two hot-reloadable fields in the same save); the five `src/AgentCore.Tests/ConfigLocatorTests.cs` cases cover env-var-valid, env-var-fails-sentinel, walk-up-finds, walk-up-skips-misleading, and none-found-throws. Original 7 Phase A pytests + 2 Phase A AgentCore tests continue to pass unchanged.
 
 ### Phase C — Supervisor: spawn, watch, restart all four child processes (foreground mode)
 
@@ -92,7 +101,7 @@ This re-plan supersedes the original plan from Phase 2 onward. It is structured 
 **Scope of follow-up planning session:**
 - API for `orchestrator/supervisor.py`: a `Supervisor` class taking a list of `ChildSpec(name, exe, args, working_dir, restart_policy)` and exposing `start_all()` / `stop_all()` / status snapshot. Wait on child handles via a dedicated thread (`WaitForMultipleObjects` per old Phase 4 step 2 — applicable here in foreground form too).
 - How `--foreground` wires Supervisor between PolicyManager and PipeServer in `orchestrator/__main__.py:_run_foreground`.
-- Restart counter reset after `stable_uptime_reset_seconds` of stable running (`orchestrator.yaml` `supervisor:` section).
+- Restart counter reset after `stable_uptime_reset_seconds` of stable running (`config.yaml` `supervisor:` section).
 - Logging conventions per child (separate log file per child? interleaved in `dlp-agent.log` with prefix?).
 - For Controller specifically: it currently relies on its own Ctrl+C → `cts.Cancel()` path (`Controller/Program.cs:34–39`) to release the alive mutex *before* `ProcessMonitor.Dispose()` blocks. Supervisor must use a clean shutdown signal (CTRL_BREAK_EVENT to the console process group, or a named event the Controller waits on) — NOT `TerminateProcess`, which would leave hooks active in injected processes. Confirm signal mechanism in the follow-up session.
 - Whether mitmdump needs the working directory set to `interceptors/browser/` (matches old plan Phase 0 note).
@@ -104,7 +113,7 @@ This re-plan supersedes the original plan from Phase 2 onward. It is structured 
 **Goal:** one `python -m orchestrator --install` stands up the full endpoint; one `--uninstall` reverses everything idempotently.
 
 **Scope of follow-up planning session:**
-- Layout under `%ProgramFiles%\DLP\`: where the orchestrator, mitmproxy CA, Controller.exe, Payload.dll, TransferAgent.exe, DlpShellExt.dll, and `orchestrator.yaml` get copied.
+- Layout under `%ProgramFiles%\DLP\`: where the orchestrator, mitmproxy CA, Controller.exe, Payload.dll, TransferAgent.exe, DlpShellExt.dll, and `config.yaml` get copied.
 - Build orchestration: should `--install` build the C# / C++ projects (like `verify-install.ps1` does today via `dotnet publish` + `msbuild`), or expect pre-built artifacts in a known location? Recommendation: expect pre-built; emit a clear error if missing. Building is a developer concern.
 - mitmproxy CA bootstrap (old plan Phase 3 step 1a–b) — run `mitmdump` briefly to generate `~/.mitmproxy/`, then `certutil -addstore -f Root <cer>`. Record thumbprint in `%PROGRAMDATA%\DLP\state\installed_ca.txt`.
 - HKCU proxy backup + set (old plan Phase 3 step 1c). Phase 3 only handles installer's HKCU; Phase E extends to other sessions.
@@ -150,8 +159,8 @@ This re-plan supersedes the original plan from Phase 2 onward. It is structured 
 
 These are intentionally not resolved here — they will be answered when each phase is planned in detail:
 
-1. **Phase B:** Controller reads `orchestrator.yaml` directly, or installer-synced `config.yaml`?
-2. **Phase B:** Does Controller's own `FileSystemWatcher` hot-reload stay, or is hot-reload centralised in the orchestrator?
+1. ~~**Phase B:** Controller reads `orchestrator.yaml` directly, or installer-synced `config.yaml`?~~ **RESOLVED:** Controller reads central `config.yaml` directly via `DlpShared.ConfigLocator`. No shadow file.
+2. ~~**Phase B:** Does Controller's own `FileSystemWatcher` hot-reload stay, or is hot-reload centralised in the orchestrator?~~ **RESOLVED:** Centralised. Controller subscribes to the orchestrator's ctl-pipe and re-applies its existing selective-update logic on each push. The FileSystemWatcher on the legacy local file is removed.
 3. **Phase C:** Shutdown signal mechanism for Controller (CTRL_BREAK, named event, or other)?
 4. **Phase C:** Per-child log streams vs. interleaved logging?
 5. **Phase D:** Build during install vs. expect pre-built?

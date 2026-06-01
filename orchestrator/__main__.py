@@ -11,6 +11,8 @@ sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(_repo_root / "analyzer"))  # engine.py uses bare 'from policy import'
 
 from orchestrator.config import load_config
+from orchestrator.config_watcher import ConfigWatcher
+from orchestrator.ctl_server import CtlServer
 from orchestrator.dispatcher import Dispatcher
 from orchestrator.logging_setup import configure_logging
 from orchestrator.policy_manager import PolicyManager
@@ -23,7 +25,7 @@ def main() -> None:
         "--config",
         type=Path,
         default=None,
-        help="Path to orchestrator.yaml (defaults to repo root).",
+        help="Path to config.yaml (defaults to repo root).",
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--foreground", action="store_true", help="Run in foreground (console) mode")
@@ -73,6 +75,46 @@ def _run_foreground(config_path: Path | None = None) -> None:
     dispatcher = Dispatcher(config, pm)
     server = PipeServer(config, dispatcher)
 
+    # ── Phase B: ctl-pipe server + config.yaml hot-reload watcher ──
+    # raw_cell holds the latest parsed yaml; ctl_server projects per-component
+    # sections from it. _handle_config_change is the bridge from the watcher
+    # to the broadcast — it implements decision #7's selective-skip for the
+    # non-hot-reloadable data_pipe / ctl_pipe fields.
+    raw_cell: dict[str, dict] = {"raw": config.raw}
+    in_use_data_pipe = config.data_pipe
+    in_use_ctl_pipe = config.ctl_pipe
+
+    ctl_server = CtlServer(config, raw_provider=lambda: raw_cell["raw"])
+
+    def _handle_config_change(new_raw: dict) -> None:
+        new_data_pipe = new_raw.get("data_pipe")
+        new_ctl_pipe = new_raw.get("ctl_pipe")
+        if new_data_pipe != in_use_data_pipe:
+            log.warning(
+                "data_pipe change requires restart; keeping %r (yaml wanted %r)",
+                in_use_data_pipe, new_data_pipe,
+            )
+        if new_ctl_pipe != in_use_ctl_pipe:
+            log.warning(
+                "ctl_pipe change requires restart; keeping %r (yaml wanted %r)",
+                in_use_ctl_pipe, new_ctl_pipe,
+            )
+        # Override the unchangeable fields back to in-use values so subscribers
+        # see an internally-consistent snapshot. Other field changes pass through.
+        new_raw = {**new_raw, "data_pipe": in_use_data_pipe, "ctl_pipe": in_use_ctl_pipe}
+        raw_cell["raw"] = new_raw
+        ctl_server.broadcast()
+
+    if config_path is None:
+        watcher_path = Path(__file__).parent.parent / "config.yaml"
+    else:
+        watcher_path = Path(config_path)
+    config_watcher = ConfigWatcher(watcher_path, on_change=_handle_config_change)
+    config_watcher.start()
+
+    ctl_thread = threading.Thread(target=ctl_server.run, daemon=True, name="ctl-server")
+    ctl_thread.start()
+
     # Run the blocking pipe server on a daemon thread so that Ctrl+C (KeyboardInterrupt)
     # can interrupt the main thread's join() — signal handlers can't fire while a
     # blocking C call (ConnectNamedPipe) holds the main thread.
@@ -85,8 +127,11 @@ def _run_foreground(config_path: Path | None = None) -> None:
     except KeyboardInterrupt:
         log.info("Ctrl+C received, shutting down...")
         server.stop()
+        ctl_server.stop()
         t.join(timeout=5.0)
+        ctl_thread.join(timeout=5.0)
     finally:
+        config_watcher.stop()
         dispatcher.shutdown(wait=True)
         pm.stop()
         log.info("Orchestrator stopped cleanly.")

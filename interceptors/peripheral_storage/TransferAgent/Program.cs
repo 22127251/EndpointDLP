@@ -37,6 +37,21 @@ internal static class Program
             return;
         }
 
+        // Phase B: read the central config once before the form runs.
+        // Fail-stop on config errors — no fallback to baked-in defaults; the
+        // ShellExtension's invocation contract assumes the orchestrator is set up.
+        try
+        {
+            OrchestratorClient.LoadConfig();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"DLP Transfer Agent could not load its configuration.\n\n{ex.Message}",
+                "DLP Transfer Agent", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
         Application.Run(new TransferForm(sources.ToArray(), dest));
     }
 }

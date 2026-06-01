@@ -1,5 +1,7 @@
 using System.Text;
+using System.Text.Json;
 using Controller.Config;
+using DlpShared;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -9,25 +11,26 @@ internal static class Program
 {
     static async Task Main(string[] args)
     {
-        var configPath = args.Length > 0 ? args[0]
-                                         : Path.Combine(AppContext.BaseDirectory, "config.yaml");
-
+        // Phase B: read the central config.yaml. The legacy
+        // Controller/Config/config.yaml has been removed; this file is the
+        // single source of truth for non-policy config across all components.
+        string yamlPath;
         AppConfig config;
+        string ctlPipeName;
         try
         {
-            var yaml = File.ReadAllText(configPath);
-            config = new DeserializerBuilder()
-                .WithNamingConvention(UnderscoredNamingConvention.Instance)
-                .Build()
-                .Deserialize<AppConfig>(yaml);
+            yamlPath = ConfigLocator.FindConfigYaml();
+            var (_, ctlPipe) = ConfigLocator.LoadTopLevel(yamlPath);
+            ctlPipeName = ctlPipe;
+            config = ConfigLocator.LoadSection<AppConfig>(yamlPath, "peripheral_storage");
         }
         catch (Exception ex)
         {
-            Log.WriteError($"[Controller] Failed to load config: {ex.Message}");
+            Log.WriteError($"[Controller] Failed to load central config: {ex.Message}");
             return;
         }
 
-        Log.Write($"[Controller] Loaded config: {configPath}");
+        Log.Write($"[Controller] Loaded central config: {yamlPath}");
         Log.Write($"[Controller] Targets: {string.Join(", ", config.TargetProcesses)}");
         Log.Write($"[Controller] Fail mode: {config.FailMode}");
 
@@ -58,10 +61,11 @@ internal static class Program
         using var processMonitor = new ProcessMonitor(config.TargetProcesses, injector);
         processMonitor.Start();
 
-        // ── Hot-reload ────────────────────────────────────────────────────────
-        // Tracks what is actually running (may differ from config.yaml after a
-        // failed reload or a shared_memory_name conflict).
+        // ── Hot-reload via ctl-pipe push ──────────────────────────────────────
+        // Tracks what is actually running (may differ from the central config
+        // after a rejected change like shared_memory_name).
         AppConfig currentConfig = config;
+        var reloadGate = new object();
 
         void ExportRunningConfig()
         {
@@ -71,8 +75,8 @@ internal static class Program
                 var sb = new StringBuilder();
                 sb.AppendLine("# AUTO-GENERATED — Do not edit directly.");
                 sb.AppendLine("# Reflects the configuration currently active in the running Controller.");
-                sb.AppendLine("# The config.yaml file may differ if a reload was attempted but failed");
-                sb.AppendLine("# (parse error, invalid values, or an attempt to change shared_memory_name).");
+                sb.AppendLine("# The central config.yaml's peripheral_storage section may differ from this");
+                sb.AppendLine("# if a ctl-pipe push was rejected (e.g., shared_memory_name change).");
                 sb.AppendLine($"# Last written: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
                 sb.AppendLine();
                 sb.Append(new SerializerBuilder()
@@ -88,83 +92,87 @@ internal static class Program
             }
         }
 
-        Timer? debounceTimer = null;
-
-        void TryReload()
+        void TryReload(AppConfig newConfig)
         {
-            Log.Write("[Controller] Config file changed — attempting reload...");
-            AppConfig newConfig;
+            lock (reloadGate)
+            {
+                if (newConfig.TargetProcesses == null || newConfig.TargetProcesses.Count == 0)
+                {
+                    Log.WriteError(
+                        "[Controller] New config has empty target_processes — keeping current config");
+                    ExportRunningConfig();
+                    return;
+                }
+
+                // shared_memory_name cannot change at runtime — warn and revert.
+                if (!string.Equals(newConfig.SharedMemoryName, currentConfig.SharedMemoryName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.WriteError(
+                        $"[Controller] shared_memory_name cannot change at runtime " +
+                        $"(was: {currentConfig.SharedMemoryName}, new: {newConfig.SharedMemoryName}) " +
+                        "— keeping old value, applying remaining changes");
+                    newConfig.SharedMemoryName = currentConfig.SharedMemoryName;
+                }
+
+                if (!newConfig.TargetProcesses.SequenceEqual(
+                        currentConfig.TargetProcesses, StringComparer.OrdinalIgnoreCase))
+                {
+                    processMonitor.UpdateTargets(newConfig.TargetProcesses);
+                }
+
+                if (newConfig.FailClosed != currentConfig.FailClosed)
+                {
+                    shmWriter.UpdateFailClosed(newConfig.FailClosed);
+                    Log.Write($"[Controller] fail_mode updated: {newConfig.FailMode}");
+                }
+
+                if (!string.Equals(newConfig.PayloadDllPath, currentConfig.PayloadDllPath,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    var resolvedNew = Path.IsPathRooted(newConfig.PayloadDllPath)
+                        ? newConfig.PayloadDllPath
+                        : Path.Combine(AppContext.BaseDirectory, newConfig.PayloadDllPath);
+                    injector.UpdateDllPath(resolvedNew);
+                }
+
+                currentConfig = newConfig;
+                Log.Write("[Controller] Config reloaded successfully.");
+                ExportRunningConfig();
+            }
+        }
+
+        // ctl-pipe subscriber. Each config_snapshot / config_update contains the
+        // top-level data_pipe / ctl_pipe plus the peripheral_storage subtree.
+        // We pluck peripheral_storage and deserialize into AppConfig.
+        var jsonOpts = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        };
+        var subscriber = new CtlPipeSubscriber(ctlPipeName, "controller", configPayload =>
+        {
+            if (!configPayload.TryGetProperty("peripheral_storage", out var peripheral))
+            {
+                Log.WriteError("[Controller] ctl push missing peripheral_storage section — ignoring");
+                return;
+            }
+            AppConfig? newConfig;
             try
             {
-                var yaml = File.ReadAllText(configPath);
-                newConfig = new DeserializerBuilder()
-                    .WithNamingConvention(UnderscoredNamingConvention.Instance)
-                    .Build()
-                    .Deserialize<AppConfig>(yaml);
+                newConfig = peripheral.Deserialize<AppConfig>(jsonOpts);
             }
             catch (Exception ex)
             {
-                Log.WriteError($"[Controller] Config parse failed: {ex.Message} — keeping current config");
-                ExportRunningConfig();
+                Log.WriteError($"[Controller] ctl payload deserialize failed: {ex.Message}");
                 return;
             }
-
-            if (newConfig.TargetProcesses == null || newConfig.TargetProcesses.Count == 0)
-            {
-                Log.WriteError("[Controller] New config has empty target_processes — keeping current config");
-                ExportRunningConfig();
-                return;
-            }
-
-            // shared_memory_name cannot change at runtime — warn and revert to old value.
-            if (!string.Equals(newConfig.SharedMemoryName, currentConfig.SharedMemoryName,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                Log.WriteError(
-                    $"[Controller] shared_memory_name cannot change at runtime " +
-                    $"(was: {currentConfig.SharedMemoryName}, new: {newConfig.SharedMemoryName}) " +
-                    "— keeping old value, applying remaining changes");
-                newConfig.SharedMemoryName = currentConfig.SharedMemoryName;
-            }
-
-            if (!newConfig.TargetProcesses.SequenceEqual(
-                    currentConfig.TargetProcesses, StringComparer.OrdinalIgnoreCase))
-            {
-                processMonitor.UpdateTargets(newConfig.TargetProcesses);
-            }
-
-            if (newConfig.FailClosed != currentConfig.FailClosed)
-            {
-                shmWriter.UpdateFailClosed(newConfig.FailClosed);
-                Log.Write($"[Controller] fail_mode updated: {newConfig.FailMode}");
-            }
-
-            if (!string.Equals(newConfig.PayloadDllPath, currentConfig.PayloadDllPath,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                var resolvedNew = Path.IsPathRooted(newConfig.PayloadDllPath)
-                    ? newConfig.PayloadDllPath
-                    : Path.Combine(AppContext.BaseDirectory, newConfig.PayloadDllPath);
-                injector.UpdateDllPath(resolvedNew);
-            }
-
-            currentConfig = newConfig;
-            Log.Write("[Controller] Config reloaded successfully.");
-            ExportRunningConfig();
-        }
-
-        using var configWatcher = new FileSystemWatcher(
-            Path.GetDirectoryName(configPath)!,
-            Path.GetFileName(configPath))
+            if (newConfig is null) return;
+            TryReload(newConfig);
+        })
         {
-            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size,
-            EnableRaisingEvents = true
+            OnLog = msg => Log.Write($"[Controller] {msg}"),
         };
-        configWatcher.Changed += (_, _) =>
-        {
-            debounceTimer?.Dispose();
-            debounceTimer = new Timer(_ => TryReload(), null, 300, Timeout.Infinite);
-        };
+        var subscriberTask = Task.Run(() => subscriber.StartAsync(cts.Token), cts.Token);
 
         ExportRunningConfig();   // write initial running-config.yaml
         // ── End hot-reload ────────────────────────────────────────────────────
@@ -174,8 +182,6 @@ internal static class Program
         try { await Task.Delay(Timeout.Infinite, cts.Token); }
         catch (OperationCanceledException) { }
 
-        debounceTimer?.Dispose();
-
         // Release the mutex NOW so injected DLLs deactivate their hooks immediately.
         // Without this, the using-block disposal order runs processMonitor.Dispose()
         // first; ManagementEventWatcher.Stop() can block 15–30 s, keeping the mutex
@@ -183,6 +189,12 @@ internal static class Program
         // so the using-block call below is a no-op.
         Log.Write("[Controller] Releasing mutex — hooks deactivating...");
         aliveMutex.Dispose();
+
+        // Best-effort drain of the subscriber task.
+        try { await subscriberTask.WaitAsync(TimeSpan.FromSeconds(2)); }
+        catch (TimeoutException) { }
+        catch (OperationCanceledException) { }
+
         Log.Write("[Controller] Shutting down...");
     }
 }

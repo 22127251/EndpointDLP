@@ -66,6 +66,10 @@ class PolicyManager:
         self._observer = Observer()
         handler = _ReloadHandler(self)
         watch_dir = str(Path(self._policies_file).resolve().parent)
+        # Watches analyzer/ (policies.yaml's parent). The Phase B config_watcher
+        # watches a different directory (config.yaml's parent), so the two
+        # observers are disjoint. _ReloadHandler also filters by filename, which
+        # keeps this safe even if the files ever share a directory.
         self._observer.schedule(handler, watch_dir, recursive=False)
         self._observer.daemon = True
         self._observer.start()
