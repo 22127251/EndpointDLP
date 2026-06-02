@@ -1,8 +1,8 @@
 policies:
 
   # --- Chặn đưa thẻ VISA vào Browser ---
-  - id: block_visa_browser
-    name: Block Visa Card in Browser
+  - id: block_visa_all_channels_with_context
+    name: Block Visa Card in on all channels with Context
     channels: [browser, clipboard, peripheral_storage]
     action: block
     type: regex
@@ -19,7 +19,7 @@ policies:
 
   # --- Chặn đưa CCCD vào Browser ---
   - id: block_cccd_all_channels_with_context
-    name: Block Vietnamese Citizen ID (CCCD) in Browser
+    name: Block Vietnamese Citizen ID (CCCD) in on all channels with Context
     channels: [browser, clipboard, peripheral_storage]
     action: block
     type: regex

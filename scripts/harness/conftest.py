@@ -168,6 +168,10 @@ def make_orchestrator():
         config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
         env = os.environ.copy()
+        # Phase C: disable the child-process supervisor for harness orchestrators.
+        # The harness tests pipe/dispatch/config-watch behavior, not the supervised
+        # children (which are exercised by test_supervisor.py).
+        env["DLP_SUPERVISOR_DISABLED"] = "1"
         if extra_env:
             env.update({k: str(v) for k, v in extra_env.items()})
 

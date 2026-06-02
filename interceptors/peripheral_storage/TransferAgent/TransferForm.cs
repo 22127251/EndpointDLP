@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Security.Cryptography;
+using System.Text;
 using System.Windows.Forms;
 
 namespace TransferAgent;
@@ -77,6 +78,27 @@ internal sealed class TransferForm : Form
         _listView.Columns.Add("Status",  80);
         _listView.Columns.Add("Size",    80);
         _listView.Columns.Add("Note",   -2);
+
+        // Phase C post-impl fix #2: Ctrl+A selects all; Ctrl+C copies selected
+        // rows as TSV. Right-click → context menu with Copy / Copy Note.
+        _listView.KeyDown += (_, e) =>
+        {
+            if (e.Control && e.KeyCode == Keys.A)
+            {
+                foreach (ListViewItem it in _listView.Items) it.Selected = true;
+                e.Handled = e.SuppressKeyPress = true;
+            }
+            else if (e.Control && e.KeyCode == Keys.C)
+            {
+                CopySelectedRowsToClipboard(noteOnly: false);
+                e.Handled = e.SuppressKeyPress = true;
+            }
+        };
+
+        var ctx = new ContextMenuStrip();
+        ctx.Items.Add("Copy",      null, (_, _) => CopySelectedRowsToClipboard(noteOnly: false));
+        ctx.Items.Add("Copy Note", null, (_, _) => CopySelectedRowsToClipboard(noteOnly: true));
+        _listView.ContextMenuStrip = ctx;
 
         // ── close / cancel button ─────────────────────────────────────────
         int btnY = ClientSize.Height - Pad - BtnH;
@@ -345,6 +367,31 @@ internal sealed class TransferForm : Form
     {
         _cts.Cancel();
         Close();
+    }
+
+    private void CopySelectedRowsToClipboard(bool noteOnly)
+    {
+        if (_listView.SelectedItems.Count == 0) return;
+        var sb = new StringBuilder();
+        foreach (ListViewItem it in _listView.SelectedItems)
+        {
+            if (noteOnly)
+            {
+                // SubItems[3] is the Note column (File, Status, Size, Note).
+                sb.AppendLine(it.SubItems.Count > 3 ? it.SubItems[3].Text : "");
+            }
+            else
+            {
+                var cells = new string[it.SubItems.Count];
+                for (int i = 0; i < it.SubItems.Count; i++) cells[i] = it.SubItems[i].Text;
+                sb.AppendLine(string.Join("\t", cells));
+            }
+        }
+        try { Clipboard.SetText(sb.ToString()); }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+            // Clipboard occasionally fails under OLE contention — silently ignore.
+        }
     }
 
     private static string FormatSize(long bytes) => bytes switch

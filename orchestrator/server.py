@@ -6,9 +6,11 @@ import os
 import threading
 import uuid
 
+import ntsecuritycon
 import pywintypes
 import win32file
 import win32pipe
+import win32security
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dispatcher import Dispatcher
@@ -21,11 +23,49 @@ _BUFFER = 65536
 _ERROR_PIPE_CONNECTED = 535
 
 
+def _build_pipe_sa() -> win32security.SECURITY_ATTRIBUTES:
+    """SECURITY_ATTRIBUTES granting Authenticated Users RW on the named pipe.
+
+    Phase C post-impl fix #1. Needed when the orchestrator runs elevated and
+    clients (notably TransferAgent, launched at medium integrity from
+    explorer.exe) need GENERIC_READ | GENERIC_WRITE on the pipe. The default
+    DACL gives Everyone only READ, which fails .NET's NamedPipeClientStream
+    (PipeDirection.InOut) with UnauthorizedAccessException("Access to path is denied.").
+
+    TODO(Phase E): combine this DACL with cross-session access for the
+    LocalSystem-service model; tighten ctl_pipe to BUILTIN\\Administrators only.
+    """
+    dacl = win32security.ACL()
+    sys_sid = win32security.CreateWellKnownSid(
+        win32security.WinLocalSystemSid, None)
+    admins_sid = win32security.CreateWellKnownSid(
+        win32security.WinBuiltinAdministratorsSid, None)
+    auth_users_sid = win32security.CreateWellKnownSid(
+        win32security.WinAuthenticatedUserSid, None)
+    dacl.AddAccessAllowedAce(
+        win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, sys_sid)
+    dacl.AddAccessAllowedAce(
+        win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, admins_sid)
+    dacl.AddAccessAllowedAce(
+        win32security.ACL_REVISION,
+        ntsecuritycon.FILE_GENERIC_READ | ntsecuritycon.FILE_GENERIC_WRITE,
+        auth_users_sid,
+    )
+    sd = win32security.SECURITY_DESCRIPTOR()
+    sd.SetSecurityDescriptorDacl(1, dacl, 0)
+    sa = win32security.SECURITY_ATTRIBUTES()
+    sa.SECURITY_DESCRIPTOR = sd
+    return sa
+
+
 class PipeServer:
     def __init__(self, config: OrchestratorConfig, dispatcher: Dispatcher) -> None:
         self._config = config
         self._dispatcher = dispatcher
         self._stop = threading.Event()
+        # Built once; Win32 reads the descriptor bytes during CreateNamedPipe
+        # and the PySECURITY_ATTRIBUTES object is reference-stable.
+        self._pipe_sa = _build_pipe_sa()
 
     def run(self) -> None:
         log.info(
@@ -77,7 +117,7 @@ class PipeServer:
                     _BUFFER,
                     _BUFFER,
                     0,
-                    None,
+                    self._pipe_sa,   # Phase C post-impl fix #1: grant Authenticated Users RW
                 )
             except pywintypes.error as exc:
                 log.error("CreateNamedPipe failed: %s", exc)

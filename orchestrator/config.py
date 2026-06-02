@@ -22,6 +22,7 @@ class OrchestratorConfig:
     mitmdump_exe: str
     addon_script: str
     clipboard_exe: str
+    controller_exe: str
     log_dir: str
     proxy_listen_port: int
     proxy_bypass: str
@@ -60,6 +61,10 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         mitmdump_exe=paths.get("mitmdump_exe", ""),
         addon_script=paths.get("addon_script", "interceptors/browser/addon.py"),
         clipboard_exe=paths.get("clipboard_exe", ""),
+        controller_exe=paths.get(
+            "controller_exe",
+            "interceptors/peripheral_storage/Controller/bin/Debug/net10.0-windows/win-x64/UsbDlpController.exe",
+        ),
         log_dir=paths.get("log_dir", ""),
         proxy_listen_port=proxy.get("listen_port", 8080),
         proxy_bypass=proxy.get("bypass", "localhost;127.0.0.1;<local>"),

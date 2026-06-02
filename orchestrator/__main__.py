@@ -17,6 +17,7 @@ from orchestrator.dispatcher import Dispatcher
 from orchestrator.logging_setup import configure_logging
 from orchestrator.policy_manager import PolicyManager
 from orchestrator.server import PipeServer
+from orchestrator.supervisor import Supervisor, build_default_specs
 
 
 def main() -> None:
@@ -121,16 +122,45 @@ def _run_foreground(config_path: Path | None = None) -> None:
     t = threading.Thread(target=server.run, daemon=True, name="pipe-server")
     t.start()
 
+    # ── Phase C: spawn and supervise the three child processes ──
+    # Both pipes are bound by now, so children connecting at startup hit a
+    # ready server. The client-side retry in CtlPipeSubscriber/OrchestratorClient
+    # is the actual safety net against any residual race.
+    # DLP_SUPERVISOR_DISABLED is the harness opt-out — the Phase A pytests
+    # only need the orchestrator's pipe/dispatch/config-watch behavior, not
+    # the supervised children.
+    supervisor: Supervisor | None = None
+    if not os.environ.get("DLP_SUPERVISOR_DISABLED"):
+        repo_root = Path(__file__).parent.parent
+        supervisor = Supervisor(
+            config,
+            repo_root=repo_root,
+            specs=build_default_specs(config, repo_root),
+        )
+        supervisor.start_all()
+        log.info(
+            "Supervisor started; supervising %d children.",
+            len(supervisor.status_snapshot()),
+        )
+    else:
+        log.info("DLP_SUPERVISOR_DISABLED set; skipping child supervisor.")
+
     try:
         while t.is_alive():
             t.join(timeout=0.5)
     except KeyboardInterrupt:
         log.info("Ctrl+C received, shutting down...")
+        # Stop children FIRST so Controller releases the alive mutex (hooks
+        # deactivate) while the orchestrator's pipes are still up.
+        if supervisor is not None:
+            supervisor.stop_all()
         server.stop()
         ctl_server.stop()
         t.join(timeout=5.0)
         ctl_thread.join(timeout=5.0)
     finally:
+        if supervisor is not None:
+            supervisor.stop_all()   # idempotent; no-op if already stopped
         config_watcher.stop()
         dispatcher.shutdown(wait=True)
         pm.stop()

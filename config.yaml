@@ -2,7 +2,7 @@
 # Policy rules live in analyzer/policies.yaml (intentionally separate).
 
 # ── Shared infrastructure (consumed by orchestrator AND every client) ──
-data_pipe: "\\\\.\\pipe\\dlp_agent"
+data_pipe: "\\\\.\\pipe\\dlp_agen"
 ctl_pipe:  "\\\\.\\pipe\\dlp_agent_ctl"
 
 # ── Orchestrator-only ──
@@ -21,10 +21,11 @@ supervisor:                          # Consumed in Phase C; harmless to keep now
   restart_window_seconds: 60
   stable_uptime_reset_seconds: 60
 
-paths:                               # Phase C/D will add more (controller_exe, etc.).
+paths:                               # Phase D will add transfer_agent_exe / shell_extension_dll.
   mitmdump_exe: ""                   # auto-detect in venv if empty
   addon_script: "interceptors/browser/addon.py"
   clipboard_exe: "src/ClipboardInterceptor/bin/Debug/net10.0-windows/ClipboardInterceptor.exe"
+  controller_exe: "interceptors/peripheral_storage/Controller/bin/Debug/net10.0-windows/win-x64/UsbDlpController.exe"
   log_dir: ""                        # empty → %PROGRAMDATA%\DLP\logs
 
 proxy:
@@ -40,7 +41,7 @@ clipboard:
 
 browser:                             # All fields migrated from interceptors/browser/config.yaml.
   pipe_timeout_seconds: 5
-  fail_behavior: "block"             # "allow" | "block" on pipe error
+  fail_behavior: "open"             # "allow" | "block" on pipe error
   temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp"   # empty → system %TEMP%
   min_upload_size_bytes: 1024
 
