@@ -14,9 +14,11 @@ from orchestrator.config import load_config
 from orchestrator.config_watcher import ConfigWatcher
 from orchestrator.ctl_server import CtlServer
 from orchestrator.dispatcher import Dispatcher
+from orchestrator.installer import run_install, run_uninstall
 from orchestrator.logging_setup import configure_logging
 from orchestrator.policy_manager import PolicyManager
 from orchestrator.server import PipeServer
+from orchestrator.service import run_as_service
 from orchestrator.supervisor import Supervisor, build_default_specs
 
 
@@ -37,9 +39,15 @@ def main() -> None:
 
     if args.foreground:
         _run_foreground(args.config)
+    elif args.install:
+        sys.exit(run_install(args.config))
+    elif args.uninstall:
+        sys.exit(run_uninstall(args.config))
+    elif args.service:
+        # SCM dispatch — only returns when the service stops.
+        run_as_service()
     else:
-        print("Not implemented yet.")
-        sys.exit(1)
+        parser.error("no mode selected; pass --foreground / --install / --uninstall / --service")
 
 
 def _maybe_install_slow_test_hook() -> None:

@@ -27,6 +27,14 @@ class OrchestratorConfig:
     proxy_listen_port: int
     proxy_bypass: str
     policies_file: str
+    # Phase D additions — sourced from paths: in config.yaml. transfer_agent_exe also
+    # backs the HKLM TransferAgentPath registry value the ShellExtension consults at
+    # runtime; shell_extension_dll + payload_dll are install-time copy sources.
+    # Defaulted to "" so existing test fixtures (test_supervisor.py:_minimal_config)
+    # that predate Phase D don't need to enumerate them.
+    transfer_agent_exe: str = ""
+    shell_extension_dll: str = ""
+    payload_dll: str = ""
     # Whole parsed yaml. Only the ctl-pipe broadcaster reads this — every other
     # orchestrator module reads the flat fields above. Keeping the raw tree lets
     # us project per-component sections (clipboard / browser / peripheral_storage)
@@ -69,5 +77,17 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         proxy_listen_port=proxy.get("listen_port", 8080),
         proxy_bypass=proxy.get("bypass", "localhost;127.0.0.1;<local>"),
         policies_file=raw.get("policies_file", "analyzer/policies.yaml"),
+        transfer_agent_exe=paths.get(
+            "transfer_agent_exe",
+            "interceptors/peripheral_storage/TransferAgent/bin/Debug/net10.0-windows/win-x64/DlpTransferAgent.exe",
+        ),
+        shell_extension_dll=paths.get(
+            "shell_extension_dll",
+            "interceptors/peripheral_storage/out/ShellExtension/Debug/DlpShellExt.dll",
+        ),
+        payload_dll=paths.get(
+            "payload_dll",
+            "interceptors/peripheral_storage/Payload/x64/Debug/Payload.dll",
+        ),
         raw=raw,
     )

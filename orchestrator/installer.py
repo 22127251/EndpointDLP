@@ -1,1 +1,859 @@
-"""--install / --uninstall: mitmproxy CA, HKCU proxy keys, Windows service registration."""
+"""Phase D --install / --uninstall driver.
+
+Transactional design: each install step is a (do, undo) pair. ``run_install``
+runs every ``do`` forward; on any exception, runs ``undo`` for already-completed
+steps in reverse. ``run_uninstall`` runs every step's ``undo`` in reverse,
+swallowing "already absent" errors so a partial install can always be cleaned.
+
+Per-step success is persisted to ``<state_dir>/install_manifest.json`` after
+every successful step, so a crash between steps still leaves enough data to
+uninstall.
+
+Phase D scope: machine install only. The Windows service body itself is a
+placeholder (see ``orchestrator/service.py``); Phase E fills it in.
+"""
+from __future__ import annotations
+
+import base64
+import ctypes
+import hashlib
+import json
+import logging
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+import winreg
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+import yaml
+
+from orchestrator.config import OrchestratorConfig, load_config
+
+log = logging.getLogger("orchestrator.installer")
+
+# CLSID + friendly name must stay in sync with the ShellExt source at
+# interceptors\peripheral_storage\ShellExtension\DlpContextMenu.h:9-13.
+_SHELLEXT_CLSID = "{B3A1C2D4-E5F6-7890-ABCD-EF1234567890}"
+_SHELLEXT_FRIENDLY = "DLP File Transfer"
+_SHELLEXT_HANDLER_NAME = "DLPTransfer"
+
+_PROXY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+# SHChangeNotify constants
+_SHCNE_ASSOCCHANGED = 0x08000000
+_SHCNF_IDLIST = 0
+
+# MoveFileExW flag for delete-on-reboot fallback (R2 in the plan)
+_MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
+
+# Well-known sc.exe / certutil exit codes we treat as "already absent" success
+_ERROR_SERVICE_DOES_NOT_EXIST = 1060
+_ERROR_SERVICE_NOT_ACTIVE = 1062
+_ERROR_SERVICE_EXISTS = 1073
+
+
+# ─── Dataclasses ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class InstallContext:
+    """Resolved + verified install state. Built once per run_install/uninstall."""
+    config: OrchestratorConfig
+    config_path: Path
+    dev_root: Path                          # source tree containing pre-built artifacts
+    install_root: Path                      # destination, e.g. %ProgramFiles%\DLP
+    state_dir: Path                         # %ProgramData%\DLP\state
+    log_dir: Path                           # %ProgramData%\DLP\logs
+    mitm_confdir: Path                      # %ProgramData%\DLP\mitmproxy
+    service_name: str
+    service_display: str
+    service_desc: str
+    artifacts: dict[str, Path] = field(default_factory=dict)
+    manifest: list[dict] = field(default_factory=list)
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.state_dir / "install_manifest.json"
+
+
+@dataclass
+class Step:
+    """One install step. ``do`` returns a JSON-serializable undo payload that
+    gets persisted to the manifest and passed back to ``undo`` later. Both
+    must be safe to call repeatedly — uninstall replays ``undo`` regardless
+    of whether ``do`` ran in this session."""
+    id: str
+    do:   Callable[[InstallContext], dict[str, Any] | None]
+    undo: Callable[[InstallContext, dict[str, Any] | None], None]
+
+
+# ─── Context construction ───────────────────────────────────────────────────
+
+
+def _resolve_under(dev_root: Path, rel_or_abs: str) -> Path:
+    p = Path(rel_or_abs)
+    return p if p.is_absolute() else (dev_root / p).resolve()
+
+
+def _build_context(config_path: Path | None) -> InstallContext:
+    cfg = load_config(config_path)
+    if config_path is not None:
+        dev_root = Path(config_path).resolve().parent
+    else:
+        dev_root = Path(__file__).resolve().parent.parent
+    inst = (cfg.raw.get("install") or {})
+
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+
+    install_root = Path(inst.get("install_root") or f"{program_files}\\DLP")
+    state_dir = Path(inst.get("state_dir") or f"{program_data}\\DLP\\state")
+    log_dir = Path(cfg.log_dir or f"{program_data}\\DLP\\logs")
+    mitm_confdir = Path(inst.get("mitmproxy_confdir") or f"{program_data}\\DLP\\mitmproxy")
+
+    return InstallContext(
+        config=cfg,
+        config_path=Path(config_path) if config_path else dev_root / "config.yaml",
+        dev_root=dev_root,
+        install_root=install_root,
+        state_dir=state_dir,
+        log_dir=log_dir,
+        mitm_confdir=mitm_confdir,
+        service_name=inst.get("service_name", "DLPAgent"),
+        service_display=inst.get("service_display_name", "DLP Endpoint Agent"),
+        service_desc=inst.get(
+            "service_description",
+            "Endpoint DLP orchestrator (Phase D placeholder; "
+            "full session-aware behavior arrives in Phase E)."),
+    )
+
+
+def _persist_manifest(ctx: InstallContext) -> None:
+    """Atomic write to ``ctx.manifest_path``."""
+    ctx.state_dir.mkdir(parents=True, exist_ok=True)
+    tmp = ctx.manifest_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(ctx.manifest, indent=2), encoding="utf-8")
+    os.replace(tmp, ctx.manifest_path)
+
+
+def _load_manifest(state_dir: Path) -> list[dict] | None:
+    try:
+        return json.loads((state_dir / "install_manifest.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+# ─── Driver ─────────────────────────────────────────────────────────────────
+
+
+def _drive_install(ctx: InstallContext, steps: list[Step]) -> int:
+    """Run every ``do`` forward; on any exception, roll back completed undos in
+    reverse and return 1. SystemExit (admin/arch checks) propagates unchanged."""
+    by_id = {s.id: s for s in steps}
+    current: Step | None = None
+    try:
+        for step in steps:
+            current = step
+            log.info("install: %s", step.id)
+            payload = step.do(ctx)
+            ctx.manifest.append({"id": step.id, "undo_payload": payload})
+            _persist_manifest(ctx)
+    except SystemExit:
+        raise
+    except Exception:
+        failed = current.id if current is not None else "<unknown>"
+        log.exception("install: step %r failed; rolling back", failed)
+        for entry in reversed(ctx.manifest):
+            step = by_id.get(entry["id"])
+            if step is None:
+                continue
+            try:
+                step.undo(ctx, entry.get("undo_payload"))
+            except Exception:
+                log.exception("install: undo of %r raised; continuing rollback", entry["id"])
+        try:
+            ctx.manifest_path.unlink()
+        except FileNotFoundError:
+            pass
+        return 1
+    log.info(
+        "install: complete. Run `sc start %s` to start the placeholder service "
+        "(it will idle until Phase E lands). Run `python -m orchestrator --foreground` "
+        "for actual DLP operation.", ctx.service_name)
+    return 0
+
+
+def _drive_uninstall(ctx: InstallContext, steps: list[Step]) -> int:
+    """Run every undo in reverse, treating "already absent" errors as success."""
+    by_id = {s.id: s for s in steps}
+    saved = _load_manifest(ctx.state_dir)
+    if saved is None:
+        log.info("uninstall: manifest missing; synthesizing default sweep from step list")
+        entries = [{"id": s.id, "undo_payload": None} for s in steps]
+    else:
+        entries = saved
+
+    for entry in reversed(entries):
+        step = by_id.get(entry["id"])
+        if step is None:
+            log.info("uninstall: unknown step %r in manifest; skipping", entry["id"])
+            continue
+        try:
+            step.undo(ctx, entry.get("undo_payload"))
+        except (FileNotFoundError, OSError, PermissionError) as e:
+            log.info("uninstall: %s already absent or skipped (%s)", entry["id"], e)
+        except Exception:
+            log.exception("uninstall: %s raised unexpectedly; continuing", entry["id"])
+
+    try:
+        ctx.manifest_path.unlink()
+    except FileNotFoundError:
+        pass
+    log.info("uninstall: complete.")
+    return 0
+
+
+# ─── Public entry points (wired from orchestrator/__main__.py) ──────────────
+
+
+def run_install(config_path: Path | None) -> int:
+    from orchestrator.logging_setup import configure_logging
+    configure_logging(foreground=True)
+    log.info("DLP installer starting")
+    ctx = _build_context(config_path)
+    return _drive_install(ctx, _build_default_steps())
+
+
+def run_uninstall(config_path: Path | None) -> int:
+    from orchestrator.logging_setup import configure_logging
+    configure_logging(foreground=True)
+    log.info("DLP uninstaller starting")
+    ctx = _build_context(config_path)
+    return _drive_uninstall(ctx, _build_default_steps())
+
+
+# ─── Helpers used by multiple steps ─────────────────────────────────────────
+
+
+def _noop_undo(_ctx: InstallContext, _payload: dict[str, Any] | None) -> None:
+    return None
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    if not src.is_dir():
+        raise FileNotFoundError(f"copy_tree: source missing: {src}")
+    log.info("copy_tree %s -> %s", src, dst)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+
+
+def _rmtree_with_retry(target: Path, attempts: int = 3, delay: float = 0.2) -> None:
+    """Delete a directory tree; if files are locked (R2: ShellExt DLL pinned
+    by explorer.exe), schedule whatever remains for delete-on-reboot."""
+    for i in range(attempts):
+        try:
+            shutil.rmtree(target)
+            return
+        except FileNotFoundError:
+            return
+        except (PermissionError, OSError):
+            if i + 1 < attempts:
+                time.sleep(delay)
+                continue
+            _schedule_delete_on_reboot(target)
+            log.warning(
+                "rmtree %s: some files locked after %d attempts; scheduled "
+                "for delete-on-reboot via MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT). "
+                "Restart Explorer or reboot to complete cleanup.", target, attempts)
+            return
+
+
+def _schedule_delete_on_reboot(target: Path) -> None:
+    if not target.exists():
+        return
+    move = ctypes.windll.kernel32.MoveFileExW
+    move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    move.restype = ctypes.c_int
+    paths: list[Path] = []
+    for root, dirs, files in os.walk(target):
+        for name in files:
+            paths.append(Path(root) / name)
+        for name in dirs:
+            paths.append(Path(root) / name)
+    paths.append(target)
+    paths.sort(key=lambda p: len(p.parts), reverse=True)
+    for p in paths:
+        if not move(str(p), None, _MOVEFILE_DELAY_UNTIL_REBOOT):
+            log.info("MoveFileExW(DELAY_UNTIL_REBOOT) failed for %s (err=%s)",
+                     p, ctypes.windll.kernel32.GetLastError())
+
+
+def _delete_key_recursive(hive: int, path: str) -> None:
+    """winreg has no recursive delete; walk children depth-first and unlink."""
+    try:
+        with winreg.OpenKey(hive, path, 0, winreg.KEY_READ) as k:
+            info = winreg.QueryInfoKey(k)
+            sub_names = [winreg.EnumKey(k, i) for i in range(info[0])]
+    except FileNotFoundError:
+        return
+    for sub in sub_names:
+        _delete_key_recursive(hive, path + "\\" + sub)
+    try:
+        winreg.DeleteKey(hive, path)
+    except FileNotFoundError:
+        pass
+
+
+def _cert_thumbprint(cer_path: Path) -> str:
+    """SHA-1 fingerprint over the DER-encoded cert. Handles both DER and PEM
+    on-disk encodings (mitmproxy uses DER for .cer historically but the format
+    has shifted between versions)."""
+    data = cer_path.read_bytes()
+    if data.lstrip().startswith(b"-----BEGIN CERTIFICATE-----"):
+        text = data.decode("ascii", errors="replace")
+        b64_lines: list[str] = []
+        in_body = False
+        for line in text.splitlines():
+            if line.startswith("-----BEGIN CERTIFICATE-----"):
+                in_body = True
+                continue
+            if line.startswith("-----END CERTIFICATE-----"):
+                break
+            if in_body:
+                b64_lines.append(line.strip())
+        data = base64.b64decode("".join(b64_lines))
+    return hashlib.sha1(data).hexdigest().upper()
+
+
+# ─── Step factory functions ─────────────────────────────────────────────────
+
+
+def _build_default_steps() -> list[Step]:
+    return [
+        _step_require_admin(),
+        _step_check_arch(),
+        _step_verify_artifacts(),
+        _step_make_dirs(),
+        _step_copy_payload(),
+        _step_bootstrap_ca(),
+        _step_install_root_ca(),
+        _step_backup_proxy(),
+        _step_set_proxy(),
+        _step_register_shellext(),
+        _step_notify_shell(),
+        _step_install_service(),
+    ]
+
+
+def _step_require_admin() -> Step:
+    def do(_ctx: InstallContext) -> dict[str, Any] | None:
+        try:
+            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            # Distinct exit code so wrapper scripts can branch on "needs elevation"
+            # vs "actual install failure".
+            print("Re-run from an elevated prompt. --install needs admin for "
+                  "HKLM writes, LocalMachine Root cert install, and sc.exe.",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        return None
+    return Step("require_admin", do, _noop_undo)
+
+
+def _step_check_arch() -> Step:
+    def do(_ctx: InstallContext) -> dict[str, Any] | None:
+        m = platform.machine()
+        if m.upper() != "AMD64":
+            print(f"DLP installer is x64-only; current arch={m!r}. "
+                  "Native binaries (Payload.dll, DlpShellExt.dll) target x64.",
+                  file=sys.stderr)
+            raise SystemExit(3)
+        return None
+    return Step("check_arch", do, _noop_undo)
+
+
+def _step_verify_artifacts() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        cfg = ctx.config
+        spec = {
+            "controller_exe":      cfg.controller_exe,
+            "clipboard_exe":       cfg.clipboard_exe,
+            "transfer_agent_exe":  cfg.transfer_agent_exe,
+            "shell_extension_dll": cfg.shell_extension_dll,
+            "payload_dll":         cfg.payload_dll,
+            "addon_script":        cfg.addon_script,
+        }
+        missing: list[str] = []
+        for key, rel in spec.items():
+            if not rel:
+                missing.append(f"{key}: <empty in config.yaml paths section>")
+                continue
+            p = _resolve_under(ctx.dev_root, rel)
+            if not p.is_file():
+                missing.append(f"{key}: {p}")
+            else:
+                ctx.artifacts[key] = p
+        embed_dir = ctx.dev_root / "python-embed"
+        embed_exe = embed_dir / "python.exe"
+        if not embed_exe.is_file():
+            missing.append(f"python-embed/python.exe: {embed_exe}")
+        else:
+            ctx.artifacts["python_embed_dir"] = embed_dir
+        pol = _resolve_under(ctx.dev_root, cfg.policies_file)
+        if not pol.is_file():
+            missing.append(f"policies_file: {pol}")
+        else:
+            ctx.artifacts["policies_file"] = pol
+        if missing:
+            raise FileNotFoundError(
+                "Missing pre-built artifacts. Run scripts\\prepare-install-payload.ps1 "
+                "and scripts\\prepare-python-embed.ps1 first, then retry --install.\n  "
+                + "\n  ".join(missing))
+        return None
+    return Step("verify_artifacts", do, _noop_undo)
+
+
+def _step_make_dirs() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        targets = [
+            ctx.install_root,
+            ctx.install_root / "bin",
+            ctx.install_root / "bin" / "Controller",
+            ctx.install_root / "bin" / "TransferAgent",
+            ctx.install_root / "bin" / "Clipboard",
+            ctx.install_root / "bin" / "ShellExt",
+            ctx.install_root / "python",
+            ctx.state_dir,
+            ctx.log_dir,
+            ctx.mitm_confdir,
+        ]
+        created: list[str] = []
+        for t in targets:
+            if not t.exists():
+                t.mkdir(parents=True, exist_ok=True)
+                created.append(str(t))
+        return {"created": created}
+
+    def undo(_ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        if not payload:
+            return
+        for p in sorted(payload.get("created", []), key=len, reverse=True):
+            path = Path(p)
+            try:
+                if path.is_dir() and not any(path.iterdir()):
+                    path.rmdir()
+            except (FileNotFoundError, OSError) as e:
+                log.info("make_dirs undo: skipping %s (%s)", p, e)
+    return Step("make_dirs", do, undo)
+
+
+def _step_copy_payload() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        # Python source trees consumed at runtime
+        _copy_tree(ctx.dev_root / "orchestrator", ctx.install_root / "orchestrator")
+        _copy_tree(ctx.dev_root / "analyzer",     ctx.install_root / "analyzer")
+        _copy_tree(ctx.dev_root / "interceptors" / "browser",
+                   ctx.install_root / "interceptors" / "browser")
+        # Python embeddable distribution
+        _copy_tree(ctx.dev_root / "python-embed", ctx.install_root / "python")
+
+        # .NET publishes — copy each publish dir whole so the .deps.json /
+        # .runtimeconfig.json / native side-DLLs all land beside the .exe.
+        controller_src = ctx.artifacts["controller_exe"].parent
+        clipboard_src  = ctx.artifacts["clipboard_exe"].parent
+        transfer_src   = ctx.artifacts["transfer_agent_exe"].parent
+        _copy_tree(controller_src, ctx.install_root / "bin" / "Controller")
+        _copy_tree(clipboard_src,  ctx.install_root / "bin" / "Clipboard")
+        _copy_tree(transfer_src,   ctx.install_root / "bin" / "TransferAgent")
+
+        # ShellExt is a single DLL; Payload.dll normally ships inside the
+        # Controller publish dir (Controller.csproj has CopyPayloadDll target),
+        # but copy it explicitly as a safety net if the publish skipped it.
+        shutil.copy2(ctx.artifacts["shell_extension_dll"],
+                     ctx.install_root / "bin" / "ShellExt" / "DlpShellExt.dll")
+        payload_dst = ctx.install_root / "bin" / "Controller" / "Payload.dll"
+        if not payload_dst.exists():
+            shutil.copy2(ctx.artifacts["payload_dll"], payload_dst)
+
+        _write_installed_config(ctx)
+        return {"install_root": str(ctx.install_root)}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        target = Path(payload["install_root"]) if payload else ctx.install_root
+        if target.exists():
+            _rmtree_with_retry(target)
+    return Step("copy_payload", do, undo)
+
+
+def _write_installed_config(ctx: InstallContext) -> None:
+    """Write ``install_root/config.yaml`` with ``paths:`` rewritten to install-mode.
+
+    Same shape as dev config, just install-root-relative paths. Comments are
+    not preserved (yaml.safe_dump drops them) — acceptable for an operational
+    file that's read but not human-edited."""
+    new_raw = dict(ctx.config.raw)
+    paths = dict(new_raw.get("paths", {}))
+    paths["mitmdump_exe"]        = "python/Scripts/mitmdump.exe"
+    paths["addon_script"]        = "interceptors/browser/addon.py"
+    paths["clipboard_exe"]       = "bin/Clipboard/ClipboardInterceptor.exe"
+    paths["controller_exe"]      = "bin/Controller/UsbDlpController.exe"
+    paths["transfer_agent_exe"]  = "bin/TransferAgent/DlpTransferAgent.exe"
+    paths["shell_extension_dll"] = "bin/ShellExt/DlpShellExt.dll"
+    paths["payload_dll"]         = "bin/Controller/Payload.dll"
+    new_raw["paths"] = paths
+    install_section = dict(new_raw.get("install") or {})
+    install_section["install_root"] = str(ctx.install_root)
+    new_raw["install"] = install_section
+    out = ctx.install_root / "config.yaml"
+    out.write_text(yaml.safe_dump(new_raw, sort_keys=False), encoding="utf-8")
+    log.info("wrote installed config to %s", out)
+
+
+def _step_bootstrap_ca() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        cer = ctx.mitm_confdir / "mitmproxy-ca-cert.cer"
+        if cer.is_file():
+            log.info("bootstrap_ca: %s already present; skipping mitmdump run", cer)
+            return {"cer": str(cer)}
+        python_exe = ctx.install_root / "python" / "python.exe"
+        if not python_exe.is_file():
+            # If we're called before copy_payload (e.g. recovery scenarios),
+            # fall back to the dev-tree embed.
+            python_exe = ctx.dev_root / "python-embed" / "python.exe"
+        cmd = [
+            str(python_exe), "-m", "mitmproxy.tools.dump",
+            "--no-server",
+            "--set", f"confdir={ctx.mitm_confdir}",
+        ]
+        log.info("bootstrap_ca: launching %s", " ".join(cmd))
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace")
+        try:
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                if cer.is_file():
+                    log.info("bootstrap_ca: cert produced at %s", cer)
+                    break
+                if proc.poll() is not None:
+                    out, err = proc.communicate(timeout=2.0)
+                    raise RuntimeError(
+                        f"mitmdump exited (code={proc.returncode}) without producing "
+                        f"the CA cert.\nstdout: {out}\nstderr: {err}")
+                time.sleep(0.2)
+            if not cer.is_file():
+                raise RuntimeError(
+                    f"mitmdump did not produce {cer} within 10 s. "
+                    "CA bootstrap failed; aborting install.")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        return {"cer": str(cer), "confdir": str(ctx.mitm_confdir)}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        # Remove the entire mitmproxy confdir we generated.
+        confdir = Path((payload or {}).get("confdir") or ctx.mitm_confdir)
+        if confdir.exists():
+            try:
+                shutil.rmtree(confdir)
+            except (FileNotFoundError, OSError) as e:
+                log.info("bootstrap_ca undo: rmtree %s skipped (%s)", confdir, e)
+    return Step("bootstrap_ca", do, undo)
+
+
+def _step_install_root_ca() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        cer = ctx.mitm_confdir / "mitmproxy-ca-cert.cer"
+        if not cer.is_file():
+            raise FileNotFoundError(f"install_root_ca: CA cert missing: {cer}")
+        thumb = _cert_thumbprint(cer)
+        inst = ctx.config.raw.get("install") or {}
+        thumb_file = ctx.state_dir / inst.get("ca_thumbprint_file", "installed_ca.txt")
+        thumb_file.parent.mkdir(parents=True, exist_ok=True)
+        thumb_file.write_text(thumb, encoding="utf-8")
+        log.info("install_root_ca: SHA-1 thumbprint=%s -> %s", thumb, thumb_file)
+
+        result = subprocess.run(
+            ["certutil", "-addstore", "-f", "Root", str(cer)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"certutil -addstore failed (exit={result.returncode}):\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}")
+        log.info("install_root_ca: cert added to LocalMachine\\Root")
+        return {"thumbprint": thumb, "thumb_file": str(thumb_file)}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        thumb = (payload or {}).get("thumbprint")
+        thumb_file_str = (payload or {}).get("thumb_file") or str(
+            ctx.state_dir / "installed_ca.txt")
+        thumb_file = Path(thumb_file_str)
+        if not thumb:
+            try:
+                thumb = thumb_file.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                log.warning(
+                    "install_root_ca undo: no recorded thumbprint; clean up manually "
+                    "via certmgr.msc -> Trusted Root -> search 'mitmproxy'")
+                return
+        result = subprocess.run(
+            ["certutil", "-delstore", "Root", thumb],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        combined = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0 and "0x80092004" not in combined:
+            log.warning(
+                "certutil -delstore returned %s; stdout=%r stderr=%r",
+                result.returncode, result.stdout, result.stderr)
+        try:
+            thumb_file.unlink()
+        except FileNotFoundError:
+            pass
+    return Step("install_root_ca", do, undo)
+
+
+def _step_backup_proxy() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        backup: dict[str, Any] = {
+            "ProxyEnable": None, "ProxyServer": None, "ProxyOverride": None,
+        }
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PROXY_KEY,
+                                0, winreg.KEY_READ) as k:
+                for name in backup:
+                    try:
+                        val, _ = winreg.QueryValueEx(k, name)
+                        backup[name] = val
+                    except FileNotFoundError:
+                        pass
+        except FileNotFoundError:
+            log.warning("backup_proxy: HKCU\\%s missing; backup empty", _PROXY_KEY)
+        inst = ctx.config.raw.get("install") or {}
+        backup_file = ctx.state_dir / inst.get("proxy_backup_file", "proxy_backup.json")
+        backup_file.parent.mkdir(parents=True, exist_ok=True)
+        backup_file.write_text(json.dumps(backup, indent=2), encoding="utf-8")
+        log.info("backup_proxy: snapshot saved to %s", backup_file)
+        return {"backup_file": str(backup_file)}
+
+    def undo(_ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        # The actual restore happens in set_proxy's undo, which reads this
+        # file. Here we just delete the backup itself (after set_proxy has
+        # already used it — undos run in reverse order).
+        path_str = (payload or {}).get("backup_file")
+        if path_str:
+            try:
+                Path(path_str).unlink()
+            except FileNotFoundError:
+                pass
+    return Step("backup_proxy", do, undo)
+
+
+def _step_set_proxy() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        port = ctx.config.proxy_listen_port
+        proxy_server = f"127.0.0.1:{port}"
+        bypass = ctx.config.proxy_bypass
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PROXY_KEY,
+                            0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(k, "ProxyServer", 0, winreg.REG_SZ, proxy_server)
+            winreg.SetValueEx(k, "ProxyOverride", 0, winreg.REG_SZ, bypass)
+        log.info("set_proxy: HKCU ProxyEnable=1 ProxyServer=%s ProxyOverride=%s",
+                 proxy_server, bypass)
+        return {"applied": {"ProxyEnable": 1, "ProxyServer": proxy_server,
+                            "ProxyOverride": bypass}}
+
+    def undo(ctx: InstallContext, _payload: dict[str, Any] | None) -> None:
+        inst = ctx.config.raw.get("install") or {}
+        backup_file = ctx.state_dir / inst.get("proxy_backup_file", "proxy_backup.json")
+        try:
+            backup = json.loads(backup_file.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            backup = {"ProxyEnable": None, "ProxyServer": None, "ProxyOverride": None}
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _PROXY_KEY,
+                                0, winreg.KEY_SET_VALUE) as k:
+                for name in ("ProxyEnable", "ProxyServer", "ProxyOverride"):
+                    val = backup.get(name)
+                    if val is None:
+                        try:
+                            winreg.DeleteValue(k, name)
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        kind = winreg.REG_DWORD if isinstance(val, int) else winreg.REG_SZ
+                        winreg.SetValueEx(k, name, 0, kind, val)
+        except FileNotFoundError:
+            pass
+        subprocess.run(["netsh", "winhttp", "reset", "proxy"],
+                       capture_output=True, check=False)
+    return Step("set_proxy", do, undo)
+
+
+def _step_register_shellext() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        shellext_dll = ctx.install_root / "bin" / "ShellExt" / "DlpShellExt.dll"
+        transfer_exe = ctx.install_root / "bin" / "TransferAgent" / "DlpTransferAgent.exe"
+
+        # Entries we add. Each entry is either a (sub)key we created (entire
+        # key gets recursively deleted on undo) OR a single named value we
+        # added to an existing key (only that value gets cleaned up).
+        keys_created: list[dict[str, Any]] = []
+
+        def _create_key(path: str, default_value: str | None = None,
+                        values: dict[str, str] | None = None) -> None:
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+                if default_value is not None:
+                    winreg.SetValueEx(k, "", 0, winreg.REG_SZ, default_value)
+                if values:
+                    for name, val in values.items():
+                        winreg.SetValueEx(k, name, 0, winreg.REG_SZ, val)
+            keys_created.append({"path": path})
+
+        def _set_value(path: str, value_name: str, value: str) -> None:
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+                winreg.SetValueEx(k, value_name, 0, winreg.REG_SZ, value)
+            keys_created.append({"path": path, "value_name": value_name})
+
+        # CLSID class registration
+        _create_key(rf"Software\Classes\CLSID\{_SHELLEXT_CLSID}",
+                    default_value=_SHELLEXT_FRIENDLY)
+        _create_key(rf"Software\Classes\CLSID\{_SHELLEXT_CLSID}\InProcServer32",
+                    default_value=str(shellext_dll),
+                    values={"ThreadingModel": "Apartment"})
+
+        # Context menu handler entries (file + directory)
+        _create_key(
+            rf"Software\Classes\*\shellex\ContextMenuHandlers\{_SHELLEXT_HANDLER_NAME}",
+            default_value=_SHELLEXT_CLSID)
+        _create_key(
+            rf"Software\Classes\Directory\shellex\ContextMenuHandlers\{_SHELLEXT_HANDLER_NAME}",
+            default_value=_SHELLEXT_CLSID)
+
+        # Approved-shellext list (Explorer SAFER policy)
+        _set_value(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Approved",
+            _SHELLEXT_CLSID, _SHELLEXT_FRIENDLY)
+
+        # DlpContextMenu.cpp reads HKLM\SOFTWARE\DLPAgent\TransferAgentPath first.
+        _set_value(r"SOFTWARE\DLPAgent", "TransferAgentPath", str(transfer_exe))
+
+        log.info("register_shellext: wrote %d HKLM entries", len(keys_created))
+        return {"keys": keys_created}
+
+    def undo(_ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        if not payload:
+            return
+        # Iterate in reverse so subkeys come before parents
+        for entry in reversed(payload.get("keys", [])):
+            path = entry["path"]
+            value_name = entry.get("value_name")
+            try:
+                if value_name is not None:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path,
+                                        0, winreg.KEY_SET_VALUE) as k:
+                        try:
+                            winreg.DeleteValue(k, value_name)
+                        except FileNotFoundError:
+                            pass
+                else:
+                    _delete_key_recursive(winreg.HKEY_LOCAL_MACHINE, path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log.info("register_shellext undo: %s skipped (%s)", path, e)
+    return Step("register_shellext", do, undo)
+
+
+def _step_notify_shell() -> Step:
+    def _notify() -> None:
+        ctypes.windll.shell32.SHChangeNotify(
+            _SHCNE_ASSOCCHANGED, _SHCNF_IDLIST, None, None)
+    def do(_ctx: InstallContext) -> dict[str, Any] | None:
+        _notify()
+        return None
+    def undo(_ctx: InstallContext, _payload: dict[str, Any] | None) -> None:
+        _notify()
+    return Step("notify_shell", do, undo)
+
+
+def _step_install_service() -> Step:
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        python_exe = ctx.install_root / "python" / "python.exe"
+        config_yaml = ctx.install_root / "config.yaml"
+        bin_path = (
+            f'"{python_exe}" -m orchestrator --service '
+            f'--config "{config_yaml}"'
+        )
+        create = subprocess.run(
+            ["sc.exe", "create", ctx.service_name,
+             "binPath=", bin_path,
+             "start=", "demand",
+             "DisplayName=", ctx.service_display],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if create.returncode == 0:
+            log.info("install_service: created %s", ctx.service_name)
+        elif create.returncode == _ERROR_SERVICE_EXISTS:
+            log.info("install_service: %s exists; updating via sc config",
+                     ctx.service_name)
+            update = subprocess.run(
+                ["sc.exe", "config", ctx.service_name,
+                 "binPath=", bin_path,
+                 "start=", "demand",
+                 "DisplayName=", ctx.service_display],
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if update.returncode != 0:
+                raise RuntimeError(
+                    f"sc.exe config {ctx.service_name} failed "
+                    f"(exit={update.returncode}): stdout={update.stdout!r} "
+                    f"stderr={update.stderr!r}")
+        else:
+            raise RuntimeError(
+                f"sc.exe create {ctx.service_name} failed "
+                f"(exit={create.returncode}): stdout={create.stdout!r} "
+                f"stderr={create.stderr!r}")
+        subprocess.run(
+            ["sc.exe", "description", ctx.service_name, ctx.service_desc],
+            capture_output=True, check=False)
+        return {"service_name": ctx.service_name}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        name = (payload or {}).get("service_name", ctx.service_name)
+        stop = subprocess.run(
+            ["sc.exe", "stop", name],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if stop.returncode not in (0, _ERROR_SERVICE_NOT_ACTIVE,
+                                   _ERROR_SERVICE_DOES_NOT_EXIST):
+            log.info("sc stop %s returned %s (continuing to delete)",
+                     name, stop.returncode)
+        delete = subprocess.run(
+            ["sc.exe", "delete", name],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if delete.returncode not in (0, _ERROR_SERVICE_DOES_NOT_EXIST):
+            log.warning("sc delete %s returned %s; stderr=%r",
+                        name, delete.returncode, delete.stderr)
+    return Step("install_service", do, undo)
+
+
+# ─── Module-level handle exposed for harness testing ────────────────────────
+# scripts/harness/test_installer.py imports _drive_install/_drive_uninstall
+# directly to exercise the rollback logic without needing real registry,
+# certutil, or sc.exe access.
+
+
+__all__ = [
+    "InstallContext", "Step",
+    "run_install", "run_uninstall",
+    "_drive_install", "_drive_uninstall",
+    "_build_context", "_build_default_steps",
+]
