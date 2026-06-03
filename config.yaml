@@ -21,11 +21,16 @@ supervisor:                          # Consumed in Phase C; harmless to keep now
   restart_window_seconds: 60
   stable_uptime_reset_seconds: 60
 
-paths:                               # Phase D will add transfer_agent_exe / shell_extension_dll.
+paths:
   mitmdump_exe: ""                   # auto-detect in venv if empty
   addon_script: "interceptors/browser/addon.py"
   clipboard_exe: "src/ClipboardInterceptor/bin/Debug/net10.0-windows/ClipboardInterceptor.exe"
   controller_exe: "interceptors/peripheral_storage/Controller/bin/Debug/net10.0-windows/win-x64/UsbDlpController.exe"
+  # Phase D additions — sourced by --install. transfer_agent_exe is also referenced by
+  # the HKLM TransferAgentPath registry value the ShellExtension reads at runtime.
+  transfer_agent_exe: "interceptors/peripheral_storage/TransferAgent/bin/Debug/net10.0-windows/win-x64/DlpTransferAgent.exe"
+  shell_extension_dll: "interceptors/peripheral_storage/out/ShellExtension/Debug/DlpShellExt.dll"
+  payload_dll: "interceptors/peripheral_storage/Payload/x64/Debug/Payload.dll"
   log_dir: ""                        # empty → %PROGRAMDATA%\DLP\logs
 
 proxy:
@@ -33,6 +38,18 @@ proxy:
   bypass: "localhost;127.0.0.1;<local>"
 
 policies_file: "analyzer/policies.yaml"
+
+# ── Phase D installer settings (read by orchestrator/installer.py via raw['install']) ──
+install:
+  install_root: ""                              # empty → %ProgramFiles%\DLP
+  state_dir: ""                                 # empty → %PROGRAMDATA%\DLP\state
+  mitmproxy_confdir: ""                         # empty → %PROGRAMDATA%\DLP\mitmproxy
+  service_name: "DLPAgent"
+  service_display_name: "DLP Endpoint Agent"
+  service_description: "Endpoint DLP orchestrator (Phase D placeholder; full session-aware behavior arrives in Phase E)."
+  ca_thumbprint_file: "installed_ca.txt"        # relative to state_dir
+  proxy_backup_file:  "proxy_backup.json"       # relative to state_dir
+  install_manifest_file: "install_manifest.json" # relative to state_dir
 
 # ── Per-component sections (each component reads ONLY its own subtree) ──
 

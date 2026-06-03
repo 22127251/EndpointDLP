@@ -10,14 +10,17 @@ _repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(_repo_root / "analyzer"))  # engine.py uses bare 'from policy import'
 
-from orchestrator.config import load_config
-from orchestrator.config_watcher import ConfigWatcher
-from orchestrator.ctl_server import CtlServer
-from orchestrator.dispatcher import Dispatcher
-from orchestrator.logging_setup import configure_logging
-from orchestrator.policy_manager import PolicyManager
-from orchestrator.server import PipeServer
-from orchestrator.supervisor import Supervisor, build_default_specs
+# Top-level imports are intentionally minimal. Per-mode imports happen inside
+# each dispatch branch below. Reason: the bundled `python-embed` only has the
+# orchestrator's top-level requirements installed (mitmproxy + pywin32 +
+# pyyaml + watchdog). The analyzer's deps (pyahocorasick, google-re2,
+# PyMuPDF, …) live in analyzer\requirements.txt and are NOT in the embed.
+# An eager `from orchestrator.policy_manager import PolicyManager` here would
+# cascade into `from analyzer.engine import DLPEngine` → `import ahocorasick`,
+# which raises ModuleNotFoundError from the bundled Python. That killed the
+# SCM-launched --service before pywin32's StartServiceCtrlDispatcher ran,
+# producing 1053 timeouts. Keeping these imports lazy lets --service start
+# from the embed even when the analyzer deps aren't installed.
 
 
 def main() -> None:
@@ -37,9 +40,18 @@ def main() -> None:
 
     if args.foreground:
         _run_foreground(args.config)
+    elif args.install:
+        from orchestrator.installer import run_install
+        sys.exit(run_install(args.config))
+    elif args.uninstall:
+        from orchestrator.installer import run_uninstall
+        sys.exit(run_uninstall(args.config))
+    elif args.service:
+        # SCM dispatch — only returns when the service stops.
+        from orchestrator.service import run_as_service
+        run_as_service()
     else:
-        print("Not implemented yet.")
-        sys.exit(1)
+        parser.error("no mode selected; pass --foreground / --install / --uninstall / --service")
 
 
 def _maybe_install_slow_test_hook() -> None:
@@ -52,6 +64,9 @@ def _maybe_install_slow_test_hook() -> None:
         delay_s = float(raw) / 1000.0
     except ValueError:
         return
+    # Lazy import — PolicyManager pulls analyzer deps that may not be installed
+    # in every Python environment (notably the bundled embed).
+    from orchestrator.policy_manager import PolicyManager
     original_analyze = PolicyManager.analyze
 
     def slow_analyze(self, *args, **kwargs):
@@ -65,6 +80,19 @@ def _maybe_install_slow_test_hook() -> None:
 
 
 def _run_foreground(config_path: Path | None = None) -> None:
+    # Foreground mode needs the full orchestrator stack including the analyzer.
+    # These imports happen here (not at module top) so --service / --install /
+    # --uninstall can complete without analyzer deps being installed — see the
+    # comment block at the top of this file.
+    from orchestrator.config import load_config
+    from orchestrator.config_watcher import ConfigWatcher
+    from orchestrator.ctl_server import CtlServer
+    from orchestrator.dispatcher import Dispatcher
+    from orchestrator.logging_setup import configure_logging
+    from orchestrator.policy_manager import PolicyManager
+    from orchestrator.server import PipeServer
+    from orchestrator.supervisor import Supervisor, build_default_specs
+
     configure_logging(foreground=True)
     log = logging.getLogger("orchestrator")
     log.info("Starting DLP orchestrator (foreground)")
