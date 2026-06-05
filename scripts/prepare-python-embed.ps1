@@ -74,6 +74,39 @@ $Requirements = Join-Path $RepoRoot "requirements.txt"
 & $PyExe -m pip install --no-warn-script-location -r $Requirements
 if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements.txt failed (exit=$LASTEXITCODE)" }
 
+# Phase E (Q-E3): the real service body imports analyzer.engine, which needs the
+# analyzer's heavy deps (pyahocorasick, google-re2, PyMuPDF, python-docx, ...).
+# Phase D deliberately omitted these (the placeholder service didn't import the
+# analyzer). Bundle them now so `python -m orchestrator --service` can run the
+# real DLP loop from the embed. pyahocorasick compiles here on the dev box (which
+# has the VS C++ toolchain) and ships built into Lib\site-packages, so the target
+# VM needs no compiler. Expect the embed to grow to ~200-400 MB.
+# pyahocorasick has no cp313 Windows wheel and the embeddable distribution can
+# NOT compile C extensions (it ships no Include\ or libs\). So a plain
+# `pip install pyahocorasick` against the embed would try a source build and
+# fail. Instead reuse the already-compiled extension from the dev .venv: drop
+# the .pyd + its dist-info into the embed's site-packages BEFORE the analyzer
+# install, so pip sees pyahocorasick already satisfied and skips the build.
+# (cp313 ABI is stable across 3.13.x, so a .venv 3.13.x .pyd runs on the embed.)
+$VenvSitePackages  = Join-Path $RepoRoot ".venv\Lib\site-packages"
+$EmbedSitePackages = Join-Path $EmbedDir "Lib\site-packages"
+$AhoPyd = Get-ChildItem -Path $VenvSitePackages -Filter "ahocorasick*.pyd" -ErrorAction SilentlyContinue | Select-Object -First 1
+$AhoDistInfo = Get-ChildItem -Path $VenvSitePackages -Directory -Filter "pyahocorasick-*.dist-info" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $AhoPyd -or -not $AhoDistInfo) {
+    throw ("Could not find a compiled pyahocorasick in $VenvSitePackages " +
+           "(need ahocorasick*.pyd + pyahocorasick-*.dist-info). Install it into " +
+           "the dev .venv first from an x64 Native Tools prompt: pip install pyahocorasick")
+}
+Write-Host "Seeding embed with pre-compiled pyahocorasick ($($AhoPyd.Name)) from .venv ..."
+if (-not (Test-Path $EmbedSitePackages)) { New-Item -ItemType Directory -Force $EmbedSitePackages | Out-Null }
+Copy-Item $AhoPyd.FullName      -Destination $EmbedSitePackages -Force
+Copy-Item $AhoDistInfo.FullName -Destination $EmbedSitePackages -Recurse -Force
+
+Write-Host "Installing analyzer\requirements.txt ..."
+$AnalyzerRequirements = Join-Path $RepoRoot "analyzer\requirements.txt"
+& $PyExe -m pip install --no-warn-script-location -r $AnalyzerRequirements
+if ($LASTEXITCODE -ne 0) { throw "pip install -r analyzer\requirements.txt failed (exit=$LASTEXITCODE)" }
+
 # Write sitecustomize.py: makes pywin32_system32 DLLs (pywintypes313.dll,
 # pythoncom313.dll) findable by `import win32service` etc. on the embeddable
 # distribution, which otherwise doesn't run pywin32's post-install hook.
@@ -91,9 +124,9 @@ if _pywin32.is_dir():
 '@
 Set-Content -Path $SiteCustomize -Value $SiteCustomizeBody -Encoding UTF8
 
-Write-Host "Validating: import win32service, win32event, servicemanager ..."
-& $PyExe -c "import win32service, win32event, servicemanager, mitmproxy, yaml, watchdog; print('embed OK')"
-if ($LASTEXITCODE -ne 0) { throw "pywin32/mitmproxy/yaml/watchdog import failed (exit=$LASTEXITCODE)" }
+Write-Host "Validating: orchestrator + analyzer imports ..."
+& $PyExe -c "import win32service, win32event, servicemanager, mitmproxy, yaml, watchdog, ahocorasick, re2, fitz; print('embed OK')"
+if ($LASTEXITCODE -ne 0) { throw "orchestrator/analyzer dep import failed (exit=$LASTEXITCODE)" }
 
 Write-Host ""
 Write-Host "Done. python-embed\ is ready for `python -m orchestrator --install`." -ForegroundColor Green

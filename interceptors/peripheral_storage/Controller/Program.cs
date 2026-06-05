@@ -34,6 +34,11 @@ internal static class Program
         Log.Write($"[Controller] Targets: {string.Join(", ", config.TargetProcesses)}");
         Log.Write($"[Controller] Fail mode: {config.FailMode}");
 
+        // Phase E: enable SeDebugPrivilege up front so injection works when the
+        // Controller runs in Session 0 (LocalSystem service) and must reach a
+        // user-session explorer.exe. No-op-ish for same-session (Phase C) runs.
+        Privileges.EnableSeDebug();
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
         {

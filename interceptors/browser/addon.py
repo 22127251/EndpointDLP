@@ -1080,18 +1080,34 @@ def _block_gmail(flow: http.HTTPFlow) -> None:
 
 
 def _notify_blocked(filename: str, reason: str) -> None:
-    """Show a Windows MessageBox when an upload is blocked (runs in a thread to avoid blocking proxy)."""
+    """Show a block notice to the interactive user (runs in a thread so it never
+    blocks the proxy).
+
+    Uses WTSSendMessageW to render the box on the active console session's desktop
+    rather than user32.MessageBoxW. Reason: under the DLPAgent service mitmdump
+    runs in Session 0, whose desktop the user never sees (and Interactive Services
+    Detection was removed in Win10 1803+), so a plain MessageBox would be invisible.
+    In --foreground the active console session is the user's, so this works there too.
+    """
     def _show():
         try:
-            if not reason:
-                msg = f"File: {filename}"
-            else:
-                msg = f"File: {filename}\nReason: {reason}"
-            ctypes.windll.user32.MessageBoxW(
-                0,
-                msg,
-                "Upload Blocked by DLP",
-                0x40 | 0x1000 | 0x40000,  # MB_ICONINFORMATION | MB_SYSTEMMODAL | MB_TOPMOST
+            title = "Upload Blocked by DLP"
+            msg = f"File: {filename}" if not reason else f"File: {filename}\nReason: {reason}"
+            kernel32 = ctypes.windll.kernel32
+            kernel32.WTSGetActiveConsoleSessionId.restype = ctypes.c_uint
+            session_id = kernel32.WTSGetActiveConsoleSessionId()
+            if session_id == 0xFFFFFFFF:   # no active console session
+                return
+            response = ctypes.c_uint(0)
+            ctypes.windll.wtsapi32.WTSSendMessageW(
+                0,                       # WTS_CURRENT_SERVER_HANDLE
+                session_id,
+                title, len(title) * 2,   # pTitle + byte length (wide chars)
+                msg, len(msg) * 2,       # pMessage + byte length
+                0x40 | 0x1000,           # MB_ICONINFORMATION | MB_TOPMOST
+                0,                       # no auto-dismiss timeout
+                ctypes.byref(response),
+                False,                   # bWait=False — don't block on the user
             )
         except Exception:
             pass

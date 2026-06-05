@@ -138,6 +138,56 @@ internal static class NativeMethods
         nuint dwSize,
         uint dwFreeType);
 
+    // ---- Token privileges (SeDebugPrivilege) ----
+    // Phase E: enabling SeDebugPrivilege lets a LocalSystem / Session-0 Controller
+    // OpenProcess a user-session explorer.exe for cross-session injection. Harmless
+    // when the Controller already runs in the user's own session.
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct LUID
+    {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct TOKEN_PRIVILEGES
+    {
+        public uint PrivilegeCount;   // always 1 for our single-privilege case
+        public LUID Luid;
+        public uint Attributes;
+    }
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    internal static extern bool OpenProcessToken(
+        IntPtr ProcessHandle,
+        uint DesiredAccess,
+        out IntPtr TokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    internal static extern bool LookupPrivilegeValueW(
+        string? lpSystemName,
+        string lpName,
+        out LUID lpLuid);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    internal static extern bool AdjustTokenPrivileges(
+        IntPtr TokenHandle,
+        bool DisableAllPrivileges,
+        ref TOKEN_PRIVILEGES NewState,
+        uint BufferLength,
+        IntPtr PreviousState,
+        IntPtr ReturnLength);
+
+    internal const uint TOKEN_ADJUST_PRIVILEGES = 0x0020;
+    internal const uint TOKEN_QUERY             = 0x0008;
+    internal const uint SE_PRIVILEGE_ENABLED    = 0x00000002;
+    internal const int  ERROR_NOT_ALL_ASSIGNED  = 1300;
+    internal const string SE_DEBUG_NAME         = "SeDebugPrivilege";
+
     // ---- Constants ----
     internal static readonly IntPtr INVALID_HANDLE_VALUE = new(-1);
     internal const uint PAGE_READWRITE     = 0x04;

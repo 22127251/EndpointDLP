@@ -182,9 +182,11 @@ def _drive_install(ctx: InstallContext, steps: list[Step]) -> int:
             pass
         return 1
     log.info(
-        "install: complete. Run `sc start %s` to start the placeholder service "
-        "(it will idle until Phase E lands). Run `python -m orchestrator --foreground` "
-        "for actual DLP operation.", ctx.service_name)
+        "install: complete. Start the agent with `Start-Service %s` "
+        "(or `sc.exe start %s` — note: bare `sc` in PowerShell is an alias for "
+        "Set-Content, not the service controller). The service spawns the "
+        "interceptors across user sessions; check %%ProgramData%%\\DLP\\logs\\dlp-agent.log.",
+        ctx.service_name, ctx.service_name)
     return 0
 
 
@@ -252,8 +254,21 @@ def _copy_tree(src: Path, dst: Path) -> None:
 
 
 def _rmtree_with_retry(target: Path, attempts: int = 3, delay: float = 0.2) -> None:
-    """Delete a directory tree; if files are locked (R2: ShellExt DLL pinned
-    by explorer.exe), schedule whatever remains for delete-on-reboot."""
+    """Delete a directory tree, removing it *now* even when files are locked.
+
+    A mapped image (a loaded DLL / running .exe) cannot be deleted while in use —
+    `os.remove` raises ERROR_ACCESS_DENIED (5) — but it CAN be renamed/moved on the
+    same volume (the file is opened FILE_SHARE_DELETE; rename needs only DELETE
+    access). The locks we hit at uninstall are: Payload.dll (injected into every
+    session's explorer.exe), DlpShellExt.dll (shell-ext loaded by explorer), and —
+    only if the uninstaller is run from the *installed* interpreter — `python\\*`.
+
+    Strategy: try a plain rmtree (fast path); if it still fails after the retries,
+    walk the tree, deleting what we can and **moving each locked file aside** into a
+    same-volume pending dir, then removing the now-empty install dirs immediately.
+    Only the tiny moved-aside copies are scheduled for delete-on-reboot. A file that
+    can't even be moved falls back to in-place reboot-scheduling (no worse than the
+    old behavior). No explorer kill (AutoRestartShell isn't guaranteed)."""
     for i in range(attempts):
         try:
             shutil.rmtree(target)
@@ -264,12 +279,79 @@ def _rmtree_with_retry(target: Path, attempts: int = 3, delay: float = 0.2) -> N
             if i + 1 < attempts:
                 time.sleep(delay)
                 continue
-            _schedule_delete_on_reboot(target)
-            log.warning(
-                "rmtree %s: some files locked after %d attempts; scheduled "
-                "for delete-on-reboot via MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT). "
-                "Restart Explorer or reboot to complete cleanup.", target, attempts)
-            return
+    _rmtree_move_locked_aside(target)
+
+
+def _rmtree_move_locked_aside(target: Path) -> None:
+    # Same-volume pending dir (sibling of target) so moves are renames, not copies.
+    pending = target.parent / f".{target.name}.pending-delete"
+    try:
+        pending.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pending = None
+
+    counter = 0
+    moved = 0
+    unmovable: list[Path] = []
+    for root, _dirs, files in os.walk(target, topdown=False):
+        root_p = Path(root)
+        for name in files:
+            f = root_p / name
+            try:
+                f.unlink()
+                continue
+            except FileNotFoundError:
+                continue
+            except (PermissionError, OSError):
+                pass  # locked (mapped image) — move it aside
+            relocated = False
+            if pending is not None:
+                dst = pending / f"{counter:04d}_{name}"
+                counter += 1
+                try:
+                    os.replace(f, dst)   # same-volume rename; works on mapped images
+                    relocated = True
+                except OSError:
+                    relocated = False
+                if relocated:
+                    _schedule_one_delete_on_reboot(dst)
+                    moved += 1
+            if not relocated:
+                _schedule_one_delete_on_reboot(f)
+                unmovable.append(f)
+        try:
+            root_p.rmdir()
+        except (FileNotFoundError, OSError):
+            pass
+
+    try:
+        target.rmdir()
+    except (FileNotFoundError, OSError):
+        pass
+    if pending is not None and pending.exists():
+        # Remove the empty pending dir at reboot, after its files (scheduled above).
+        _schedule_one_delete_on_reboot(pending)
+
+    if unmovable:
+        log.warning(
+            "rmtree %s: %d locked file(s) could not be moved aside; scheduled "
+            "in-place for delete-on-reboot. A true Restart (not a Fast-Startup "
+            "shutdown) is required to finish cleanup.", target, len(unmovable))
+    elif moved:
+        log.info(
+            "rmtree %s: tree removed now; %d locked file(s) moved aside to %s and "
+            "scheduled for delete-on-reboot.", target, moved, pending)
+    else:
+        log.info("rmtree %s: removed.", target)
+
+
+def _schedule_one_delete_on_reboot(path: Path) -> None:
+    move = ctypes.windll.kernel32.MoveFileExW
+    move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    move.restype = ctypes.c_int
+    if not move(str(path), None, _MOVEFILE_DELAY_UNTIL_REBOOT):
+        log.info("MoveFileExW(DELAY_UNTIL_REBOOT) failed for %s (err=%s)",
+                 path, ctypes.windll.kernel32.GetLastError())
 
 
 def _schedule_delete_on_reboot(target: Path) -> None:
@@ -491,6 +573,20 @@ def _step_copy_payload() -> Step:
     return Step("copy_payload", do, undo)
 
 
+# Path keys rewritten to install-layout-relative strings. Shared by the
+# installed config (_write_installed_config) and the deployable bundle config
+# (build_bundle_config). `mitmdump_exe` is NOT here because its embed directory
+# name differs: "python/..." once installed vs "python-embed/..." in the bundle.
+_INSTALL_LAYOUT_PATHS = {
+    "addon_script":        "interceptors/browser/addon.py",
+    "clipboard_exe":       "bin/Clipboard/ClipboardInterceptor.exe",
+    "controller_exe":      "bin/Controller/UsbDlpController.exe",
+    "transfer_agent_exe":  "bin/TransferAgent/DlpTransferAgent.exe",
+    "shell_extension_dll": "bin/ShellExt/DlpShellExt.dll",
+    "payload_dll":         "bin/Controller/Payload.dll",
+}
+
+
 def _write_installed_config(ctx: InstallContext) -> None:
     """Write ``install_root/config.yaml`` with ``paths:`` rewritten to install-mode.
 
@@ -499,13 +595,8 @@ def _write_installed_config(ctx: InstallContext) -> None:
     file that's read but not human-edited."""
     new_raw = dict(ctx.config.raw)
     paths = dict(new_raw.get("paths", {}))
-    paths["mitmdump_exe"]        = "python/Scripts/mitmdump.exe"
-    paths["addon_script"]        = "interceptors/browser/addon.py"
-    paths["clipboard_exe"]       = "bin/Clipboard/ClipboardInterceptor.exe"
-    paths["controller_exe"]      = "bin/Controller/UsbDlpController.exe"
-    paths["transfer_agent_exe"]  = "bin/TransferAgent/DlpTransferAgent.exe"
-    paths["shell_extension_dll"] = "bin/ShellExt/DlpShellExt.dll"
-    paths["payload_dll"]         = "bin/Controller/Payload.dll"
+    paths.update(_INSTALL_LAYOUT_PATHS)
+    paths["mitmdump_exe"] = "python/Scripts/mitmdump.exe"   # embed installed at python/
     new_raw["paths"] = paths
     install_section = dict(new_raw.get("install") or {})
     install_section["install_root"] = str(ctx.install_root)
@@ -513,6 +604,47 @@ def _write_installed_config(ctx: InstallContext) -> None:
     out = ctx.install_root / "config.yaml"
     out.write_text(yaml.safe_dump(new_raw, sort_keys=False), encoding="utf-8")
     log.info("wrote installed config to %s", out)
+
+
+def build_bundle_config(src_config_path: str | Path, dest_config_path: str | Path) -> None:
+    """Write a VM-ready ``config.yaml`` for a deployable bundle (see package-bundle.ps1).
+
+    The bundle is laid out as the install tree (``bin/...``, ``python-embed/``,
+    ``orchestrator/`` …), so ``--install --config <bundle>/config.yaml`` resolves
+    every artifact and proceeds with no edits. This rewrites:
+      - ``paths.*`` to bundle-relative (shared ``_INSTALL_LAYOUT_PATHS``; mitmdump
+        points at ``python-embed/Scripts/mitmdump.exe``, the bundle's embed dir),
+      - ``paths.log_dir`` → "" (so it defaults to %PROGRAMDATA%\\DLP\\logs on the VM),
+      - ``policies_file`` → ``analyzer/policies.yaml``,
+      - ``browser.temp_dir`` → "" (the only host-absolute setting; "" → system %TEMP%),
+      - ``install.install_root`` → "" (so it defaults to %ProgramFiles%\\DLP).
+    Everything else is copied verbatim, so new config sections flow through.
+    """
+    src = Path(src_config_path)
+    with src.open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+
+    paths = dict(raw.get("paths", {}))
+    paths.update(_INSTALL_LAYOUT_PATHS)
+    paths["mitmdump_exe"] = "python-embed/Scripts/mitmdump.exe"
+    paths["log_dir"] = ""
+    raw["paths"] = paths
+
+    raw["policies_file"] = "analyzer/policies.yaml"
+
+    browser = dict(raw.get("browser") or {})
+    if "temp_dir" in browser or browser:
+        browser["temp_dir"] = ""        # host-absolute → neutralize to system %TEMP%
+        raw["browser"] = browser
+
+    install_section = dict(raw.get("install") or {})
+    install_section["install_root"] = ""
+    raw["install"] = install_section
+
+    dest = Path(dest_config_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    log.info("wrote bundle config to %s", dest)
 
 
 def _step_bootstrap_ca() -> Step:

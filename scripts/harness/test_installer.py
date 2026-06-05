@@ -20,13 +20,51 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from orchestrator.config import OrchestratorConfig
 from orchestrator.installer import (
     InstallContext,
     Step,
     _drive_install,
     _drive_uninstall,
+    build_bundle_config,
 )
+
+
+def test_build_bundle_config_rewrites_for_vm(tmp_path: Path) -> None:
+    src = tmp_path / "config.yaml"
+    src.write_text(yaml.safe_dump({
+        "data_pipe": "p", "ctl_pipe": "c",
+        "paths": {
+            "mitmdump_exe": "",
+            "controller_exe": "interceptors/.../UsbDlpController.exe",
+            "log_dir": "D:/somewhere/logs",
+        },
+        "policies_file": "analyzer/policies.yaml",
+        "browser": {"temp_dir": r"D:\Code\GithubPublishEndpointDLP\tmp",
+                    "pipe_timeout_seconds": 5},
+        "install": {"install_root": "C:/old", "service_name": "DLPAgent"},
+        "peripheral_storage": {"target_processes": ["explorer.exe"]},
+    }), encoding="utf-8")
+    dest = tmp_path / "bundle" / "config.yaml"
+
+    build_bundle_config(src, dest)
+
+    out = yaml.safe_load(dest.read_text(encoding="utf-8"))
+    # paths rewritten to bundle/install layout
+    assert out["paths"]["controller_exe"] == "bin/Controller/UsbDlpController.exe"
+    assert out["paths"]["payload_dll"] == "bin/Controller/Payload.dll"
+    assert out["paths"]["shell_extension_dll"] == "bin/ShellExt/DlpShellExt.dll"
+    assert out["paths"]["mitmdump_exe"] == "python-embed/Scripts/mitmdump.exe"
+    assert out["paths"]["log_dir"] == ""
+    # host-absolute settings neutralized
+    assert out["browser"]["temp_dir"] == ""
+    assert out["install"]["install_root"] == ""
+    # unrelated values copied verbatim
+    assert out["browser"]["pipe_timeout_seconds"] == 5
+    assert out["peripheral_storage"]["target_processes"] == ["explorer.exe"]
+    assert out["data_pipe"] == "p"
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────

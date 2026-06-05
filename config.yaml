@@ -46,7 +46,7 @@ install:
   mitmproxy_confdir: ""                         # empty → %PROGRAMDATA%\DLP\mitmproxy
   service_name: "DLPAgent"
   service_display_name: "DLP Endpoint Agent"
-  service_description: "Endpoint DLP orchestrator (Phase D placeholder; full session-aware behavior arrives in Phase E)."
+  service_description: "Endpoint DLP orchestrator. Runs as LocalSystem, supervises the interceptor processes across user sessions, and routes intercepted data to the content analyzer."
   ca_thumbprint_file: "installed_ca.txt"        # relative to state_dir
   proxy_backup_file:  "proxy_backup.json"       # relative to state_dir
   install_manifest_file: "install_manifest.json" # relative to state_dir
@@ -127,6 +127,14 @@ peripheral_storage:                  # Controller reads this whole subtree.
 
   shared_memory_name: UsbDlpDriveMap # NOT hot-reloadable (see config_watcher in __main__.py)
   payload_dll_path: Payload.dll      # relative → resolved against Controller.exe dir
+
+  # Phase E (E0 spike result). false → Controller runs once in Session 0
+  # (LocalSystem service) and injects cross-session into every user's explorer.exe
+  # (Option A; SeDebugPrivilege enabled in the Controller). Set true ONLY if the
+  # E0 spike shows cross-session injection fails on this OS — then the service
+  # launches a Controller per user session via CreateProcessAsUser with the user's
+  # elevated/linked token (Option B). Ignored in --foreground (always Session-local).
+  controller_in_user_session: false
 
   transfer_agent:                    # TransferAgent reads only this nested subtree.
     connect_timeout_ms: 5000         # was hardcoded in OrchestratorClient.cs:24

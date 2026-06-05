@@ -49,7 +49,7 @@ def main() -> None:
     elif args.service:
         # SCM dispatch — only returns when the service stops.
         from orchestrator.service import run_as_service
-        run_as_service()
+        run_as_service(args.config)
     else:
         parser.error("no mode selected; pass --foreground / --install / --uninstall / --service")
 
@@ -80,22 +80,47 @@ def _maybe_install_slow_test_hook() -> None:
 
 
 def _run_foreground(config_path: Path | None = None) -> None:
-    # Foreground mode needs the full orchestrator stack including the analyzer.
-    # These imports happen here (not at module top) so --service / --install /
-    # --uninstall can complete without analyzer deps being installed — see the
-    # comment block at the top of this file.
+    # Thin wrapper: configure console logging, then drive the shared run-core with
+    # a stop event that Ctrl+C (KeyboardInterrupt inside run_core) trips.
+    from orchestrator.logging_setup import configure_logging
+
+    configure_logging(foreground=True)
+    stop_event = threading.Event()
+    run_core(config_path, stop_event, foreground=True)
+
+
+def run_core(
+    config_path: Path | None,
+    stop_event: "threading.Event",
+    *,
+    foreground: bool,
+    ready_callback=None,
+) -> None:
+    """Shared orchestrator run-loop for both --foreground and the Windows service.
+
+    Builds PolicyManager / Dispatcher / PipeServer / CtlServer / ConfigWatcher /
+    Supervisor and blocks until ``stop_event`` is set (service ``SvcStop``) or
+    Ctrl+C is received (foreground). ``foreground`` selects the supervisor mode:
+    foreground runs every child Session-local (Phase C); the service (foreground
+    =False) runs in Session 0 and spawns per-session children via the session
+    bridge. ``ready_callback`` (used by the service) is invoked with the live
+    Supervisor right after start so SESSIONCHANGE events can drive start/stop_session.
+
+    The caller configures logging before calling (console for foreground, file for
+    the service). Heavy imports stay inside this function so --install / --uninstall
+    / --service dispatch can run from the embed without analyzer deps — see the
+    module-top comment block.
+    """
     from orchestrator.config import load_config
     from orchestrator.config_watcher import ConfigWatcher
     from orchestrator.ctl_server import CtlServer
     from orchestrator.dispatcher import Dispatcher
-    from orchestrator.logging_setup import configure_logging
     from orchestrator.policy_manager import PolicyManager
     from orchestrator.server import PipeServer
     from orchestrator.supervisor import Supervisor, build_default_specs
 
-    configure_logging(foreground=True)
     log = logging.getLogger("orchestrator")
-    log.info("Starting DLP orchestrator (foreground)")
+    log.info("Starting DLP orchestrator (%s)", "foreground" if foreground else "service")
 
     _maybe_install_slow_test_hook()
 
@@ -164,20 +189,34 @@ def _run_foreground(config_path: Path | None = None) -> None:
             config,
             repo_root=repo_root,
             specs=build_default_specs(config, repo_root),
+            # Service mode (foreground=False) runs in Session 0 and spawns
+            # per-session children via the session bridge; foreground keeps the
+            # Phase C Session-local behavior.
+            service_mode=not foreground,
         )
         supervisor.start_all()
         log.info(
-            "Supervisor started; supervising %d children.",
+            "Supervisor started (%s); supervising %d children.",
+            "service" if not foreground else "foreground",
             len(supervisor.status_snapshot()),
         )
     else:
         log.info("DLP_SUPERVISOR_DISABLED set; skipping child supervisor.")
 
+    if ready_callback is not None:
+        # Hand the live supervisor to the service so SvcOtherEx can drive
+        # start_session / stop_session on logon / logoff.
+        ready_callback(supervisor)
+
     try:
-        while t.is_alive():
-            t.join(timeout=0.5)
+        # Block until SvcStop sets stop_event, the pipe server dies, or (foreground)
+        # Ctrl+C raises KeyboardInterrupt. The 0.5 s tick lets KeyboardInterrupt fire.
+        while not stop_event.is_set() and t.is_alive():
+            stop_event.wait(timeout=0.5)
     except KeyboardInterrupt:
         log.info("Ctrl+C received, shutting down...")
+        stop_event.set()
+    finally:
         # Stop children FIRST so Controller releases the alive mutex (hooks
         # deactivate) while the orchestrator's pipes are still up.
         if supervisor is not None:
@@ -186,9 +225,6 @@ def _run_foreground(config_path: Path | None = None) -> None:
         ctl_server.stop()
         t.join(timeout=5.0)
         ctl_thread.join(timeout=5.0)
-    finally:
-        if supervisor is not None:
-            supervisor.stop_all()   # idempotent; no-op if already stopped
         config_watcher.stop()
         dispatcher.shutdown(wait=True)
         pm.stop()
