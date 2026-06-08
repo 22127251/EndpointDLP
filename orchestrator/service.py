@@ -68,7 +68,11 @@ class DLPAgentService(win32serviceutil.ServiceFramework):
         return controls
 
     def SvcStop(self) -> None:
-        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        # Phase F: a generous wait hint so the SCM doesn't flag the bounded drain
+        # (config service.drain_timeout_seconds ≤8 s) + child teardown (grace
+        # ≤15 s) + thread joins as a hang. The checkpoint counter is managed
+        # internally by pywin32's ReportServiceStatus.
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING, waitHint=30000)
         self._stop_event.set()
         win32event.SetEvent(self.hWaitStop)
 

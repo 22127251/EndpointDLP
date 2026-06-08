@@ -22,3 +22,17 @@ def configure_logging(foreground: bool) -> None:
         console = logging.StreamHandler(sys.stdout)
         console.setFormatter(fmt)
         root.addHandler(console)
+
+    # Phase F: dedicated structured decision log (events.jsonl). The message is
+    # already a JSON line, so the formatter emits it verbatim; propagate=False
+    # keeps these out of dlp-agent.log and the console.
+    events_path = os.path.join(log_dir, "events.jsonl")
+    events_handler = RotatingFileHandler(
+        events_path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    events_handler.setFormatter(logging.Formatter("%(message)s"))
+    events_logger = logging.getLogger("dlp.events")
+    events_logger.setLevel(logging.INFO)
+    events_logger.propagate = False
+    # Avoid stacking duplicate handlers if configure_logging is called twice.
+    if not any(isinstance(h, RotatingFileHandler) for h in events_logger.handlers):
+        events_logger.addHandler(events_handler)

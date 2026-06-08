@@ -51,10 +51,28 @@ _SHCNF_IDLIST = 0
 # MoveFileExW flag for delete-on-reboot fallback (R2 in the plan)
 _MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
 
+# PF#6: dlp-ctl convenience wrapper + machine PATH so `dlp-ctl` runs from any
+# shell using the bundled embed Python (which has pywin32). The machine Path
+# lives in this HKLM key (REG_EXPAND_SZ); changes are broadcast via
+# WM_SETTINGCHANGE so new shells pick them up.
+_ENV_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+_HWND_BROADCAST = 0xFFFF
+_WM_SETTINGCHANGE = 0x1A
+_SMTO_ABORTIFHUNG = 0x0002
+_CTL_WRAPPER_NAME = "dlp-ctl.cmd"
+_CTL_WRAPPER_BODY = (
+    "@echo off\n"
+    "REM DLP admin CLI. Uses the bundled Python (which has pywin32) so dlp-ctl\n"
+    "REM works without any system Python. Run elevated for status / reload.\n"
+    '"%~dp0python\\python.exe" -m orchestrator.ctl --config "%~dp0config.yaml" %*\n'
+    "exit /b %ERRORLEVEL%\n"
+)
+
 # Well-known sc.exe / certutil exit codes we treat as "already absent" success
 _ERROR_SERVICE_DOES_NOT_EXIST = 1060
 _ERROR_SERVICE_NOT_ACTIVE = 1062
 _ERROR_SERVICE_EXISTS = 1073
+_ERROR_SERVICE_ALREADY_RUNNING = 1056
 
 
 # ─── Dataclasses ────────────────────────────────────────────────────────────
@@ -73,6 +91,7 @@ class InstallContext:
     service_name: str
     service_display: str
     service_desc: str
+    service_start_type: str = "auto"        # Phase F (Q-E4): sc.exe start= value
     artifacts: dict[str, Path] = field(default_factory=dict)
     manifest: list[dict] = field(default_factory=list)
 
@@ -125,6 +144,7 @@ def _build_context(config_path: Path | None) -> InstallContext:
         log_dir=log_dir,
         mitm_confdir=mitm_confdir,
         service_name=inst.get("service_name", "DLPAgent"),
+        service_start_type=inst.get("service_start_type", "auto"),
         service_display=inst.get("service_display_name", "DLP Endpoint Agent"),
         service_desc=inst.get(
             "service_description",
@@ -182,11 +202,16 @@ def _drive_install(ctx: InstallContext, steps: list[Step]) -> int:
             pass
         return 1
     log.info(
-        "install: complete. Start the agent with `Start-Service %s` "
-        "(or `sc.exe start %s` — note: bare `sc` in PowerShell is an alias for "
-        "Set-Content, not the service controller). The service spawns the "
-        "interceptors across user sessions; check %%ProgramData%%\\DLP\\logs\\dlp-agent.log.",
-        ctx.service_name, ctx.service_name)
+        "install: complete. The %s service is set to auto-start and a start was "
+        "requested now — verify with `Get-Service %s` (expect Running). If it is "
+        "Stopped, start it with `Start-Service %s` (note: bare `sc` in PowerShell "
+        "is an alias for Set-Content, not the service controller; use `sc.exe`). "
+        "The service spawns the interceptors across user sessions; check "
+        "%%ProgramData%%\\DLP\\logs\\dlp-agent.log. Admin CLI: open a NEW shell and "
+        "run `dlp-ctl status` (the installer added %s to PATH and dropped "
+        "dlp-ctl.cmd there) — or `.\\dlp-ctl.cmd status` from %s.",
+        ctx.service_name, ctx.service_name, ctx.service_name,
+        ctx.install_root, ctx.install_root)
     return 0
 
 
@@ -421,6 +446,8 @@ def _build_default_steps() -> list[Step]:
         _step_verify_artifacts(),
         _step_make_dirs(),
         _step_copy_payload(),
+        _step_install_ctl_wrapper(),
+        _step_add_to_path(),
         _step_bootstrap_ca(),
         _step_install_root_ca(),
         _step_backup_proxy(),
@@ -920,6 +947,84 @@ def _step_notify_shell() -> Step:
     return Step("notify_shell", do, undo)
 
 
+def _broadcast_env_change() -> None:
+    """Tell running processes (Explorer, new shells) that the environment changed
+    so a freshly-opened terminal sees the updated PATH. Best-effort."""
+    try:
+        ctypes.windll.user32.SendMessageTimeoutW(
+            _HWND_BROADCAST, _WM_SETTINGCHANGE, 0, "Environment",
+            _SMTO_ABORTIFHUNG, 5000, ctypes.byref(ctypes.c_ulong()))
+    except Exception as exc:  # noqa: BLE001 — broadcast is advisory only
+        log.info("env-change broadcast failed (harmless): %s", exc)
+
+
+def _step_install_ctl_wrapper() -> Step:
+    """Write <install_root>\\dlp-ctl.cmd so the operator runs the CLI via the
+    bundled embed Python (which has pywin32) instead of a bare `python`."""
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        path = ctx.install_root / _CTL_WRAPPER_NAME
+        path.write_text(_CTL_WRAPPER_BODY, encoding="ascii", newline="\r\n")
+        log.info("install_ctl_wrapper: wrote %s", path)
+        return {"path": str(path)}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        target = Path((payload or {}).get("path", ctx.install_root / _CTL_WRAPPER_NAME))
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.info("install_ctl_wrapper undo: skipping %s (%s)", target, exc)
+    return Step("install_ctl_wrapper", do, undo)
+
+
+def _step_add_to_path() -> Step:
+    """Append <install_root> to the machine PATH so `dlp-ctl` resolves anywhere.
+
+    Reads/writes HKLM ...\\Session Manager\\Environment Path as REG_EXPAND_SZ.
+    winreg.QueryValueEx returns REG_EXPAND_SZ *unexpanded*, so existing %vars%
+    (e.g. %SystemRoot%) are preserved on write-back.
+    """
+    def _norm(p: str) -> str:
+        return os.path.normcase(p.strip().rstrip("\\"))
+
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        entry = str(ctx.install_root)
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _ENV_KEY, 0,
+                            winreg.KEY_READ | winreg.KEY_WRITE) as k:
+            try:
+                cur, _typ = winreg.QueryValueEx(k, "Path")
+            except FileNotFoundError:
+                cur = ""
+            parts = [p for p in cur.split(";") if p]
+            if any(_norm(p) == _norm(entry) for p in parts):
+                log.info("add_to_path: %s already present", entry)
+                return {"added": False, "entry": entry}
+            new_val = cur + (";" if cur and not cur.endswith(";") else "") + entry
+            winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, new_val)
+        _broadcast_env_change()
+        log.info("add_to_path: appended %s to machine PATH", entry)
+        return {"added": True, "entry": entry}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        if not payload or not payload.get("added"):
+            return
+        entry = payload.get("entry", str(ctx.install_root))
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _ENV_KEY, 0,
+                                winreg.KEY_READ | winreg.KEY_WRITE) as k:
+                cur, _typ = winreg.QueryValueEx(k, "Path")
+                parts = [p for p in cur.split(";") if p and _norm(p) != _norm(entry)]
+                winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, ";".join(parts))
+            _broadcast_env_change()
+            log.info("add_to_path undo: removed %s from machine PATH", entry)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.info("add_to_path undo: skipping (%s)", exc)
+    return Step("add_to_path", do, undo)
+
+
 def _step_install_service() -> Step:
     def do(ctx: InstallContext) -> dict[str, Any] | None:
         python_exe = ctx.install_root / "python" / "python.exe"
@@ -931,7 +1036,7 @@ def _step_install_service() -> Step:
         create = subprocess.run(
             ["sc.exe", "create", ctx.service_name,
              "binPath=", bin_path,
-             "start=", "demand",
+             "start=", ctx.service_start_type,
              "DisplayName=", ctx.service_display],
             capture_output=True, text=True, encoding="utf-8", errors="replace")
         if create.returncode == 0:
@@ -942,7 +1047,7 @@ def _step_install_service() -> Step:
             update = subprocess.run(
                 ["sc.exe", "config", ctx.service_name,
                  "binPath=", bin_path,
-                 "start=", "demand",
+                 "start=", ctx.service_start_type,
                  "DisplayName=", ctx.service_display],
                 capture_output=True, text=True, encoding="utf-8", errors="replace")
             if update.returncode != 0:
@@ -958,6 +1063,21 @@ def _step_install_service() -> Step:
         subprocess.run(
             ["sc.exe", "description", ctx.service_name, ctx.service_desc],
             capture_output=True, check=False)
+        # Start the service now (best-effort) so it's Running right after install
+        # without waiting for the next boot. A start failure must NOT roll back an
+        # otherwise-good install — the service is start=auto and will come up on
+        # reboot regardless; just log a warning.
+        start = subprocess.run(
+            ["sc.exe", "start", ctx.service_name],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if start.returncode in (0, _ERROR_SERVICE_ALREADY_RUNNING):
+            log.info("install_service: started %s", ctx.service_name)
+        else:
+            log.warning(
+                "install_service: sc.exe start %s returned %d; start it manually "
+                "with `Start-Service %s` (it will also auto-start on reboot): %s",
+                ctx.service_name, start.returncode, ctx.service_name,
+                (start.stderr or start.stdout).strip())
         return {"service_name": ctx.service_name}
 
     def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:

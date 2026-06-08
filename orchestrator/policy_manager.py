@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -61,6 +62,9 @@ class PolicyManager:
         # so any request whose snapshot is taken AFTER a reload completes is
         # guaranteed to see the new engine (strict hot-reload bar).
         self._engine_lock = threading.Lock()
+        # Phase F: track the last-reload wall time so `dlp-ctl status` can report
+        # when policies were last (re)loaded.
+        self._last_reload_wall = time.time()
         log.info("DLPEngine ready.")
 
         self._observer = Observer()
@@ -78,7 +82,18 @@ class PolicyManager:
         with self._engine_lock:
             return self._engine
 
-    def _reload_engine(self) -> None:
+    def last_reload_time(self) -> float:
+        """Wall-clock (epoch seconds) of the last successful (re)load."""
+        return self._last_reload_wall
+
+    def force_reload(self) -> bool:
+        """On-demand reload (dlp-ctl reload / future central-server apply):
+        unconditionally rebuild the engine from disk. The file-watcher handles
+        automatic apply; this is the authoritative 'apply now'. Returns True on
+        success, False if the rebuild failed (the old engine is kept)."""
+        return self._reload_engine()
+
+    def _reload_engine(self) -> bool:
         # Construct the new engine OUTSIDE the lock — building a DLPEngine can
         # take 50–200 ms (YAML parse, regex compile, automaton build) and we
         # don't want analyze() calls stalled for that long.
@@ -86,10 +101,12 @@ class PolicyManager:
             new_engine = DLPEngine(self._policies_file)
         except Exception as exc:
             log.error("Policy reload failed, keeping old engine: %s", exc)
-            return
+            return False
         with self._engine_lock:
             self._engine = new_engine
+        self._last_reload_wall = time.time()
         log.info("Policies reloaded from %s", self._policies_file)
+        return True
 
     def stop(self) -> None:
         self._observer.stop()

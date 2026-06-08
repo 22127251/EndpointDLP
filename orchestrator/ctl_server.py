@@ -21,6 +21,7 @@ import win32file
 import win32pipe
 
 from orchestrator.config import OrchestratorConfig
+from orchestrator.pipe_security import build_pipe_sa
 
 log = logging.getLogger(__name__)
 
@@ -31,9 +32,13 @@ _ERROR_BROKEN_PIPE = 109
 _BROADCAST_WRITE_TIMEOUT_MS = 500
 _STOP_POLL_MS = 200
 
-# TODO(Phase F): tighten ctl-pipe ACL to BUILTIN\Administrators only via a custom
-# security descriptor passed as the lpSecurityAttributes arg to CreateNamedPipe.
-# For Phase B (dev/foreground mode), default SD (same-user access) is sufficient.
+# Phase F: the ctl-pipe carries config-push to the interceptor clients, one of
+# which (the per-session ClipboardInterceptor) runs under a plain, non-admin
+# user token and opens the pipe PipeDirection.InOut — so it needs RW. We grant
+# an explicit DACL (SYSTEM + Administrators full, Authenticated Users RW) rather
+# than relying on the default same-user SD, which could silently deny a
+# non-admin session's subscribe. Privileged dlp-ctl commands live on the
+# separate Administrators-only admin-pipe (see admin_server.py).
 
 _KNOWN_COMPONENTS = ("controller", "clipboard", "browser")
 
@@ -77,6 +82,8 @@ class CtlServer:
         self._subscribers: dict[str, _SubHandle] = {}
         self._sub_lock = threading.Lock()
         self._stop = threading.Event()
+        # Built once; reference-stable for repeated CreateNamedPipe calls.
+        self._pipe_sa = build_pipe_sa(allow_authenticated_users=True)
 
     def run(self) -> None:
         log.info("Ctl pipe listening on %s", self._config.ctl_pipe)
@@ -150,7 +157,7 @@ class CtlServer:
                 win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
                 win32pipe.PIPE_UNLIMITED_INSTANCES,
                 _BUFFER, _BUFFER,
-                0, None,
+                0, self._pipe_sa,
             )
         except pywintypes.error as exc:
             log.error("Ctl pipe CreateNamedPipe failed: %s", exc)

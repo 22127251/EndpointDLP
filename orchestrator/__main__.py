@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import logging
 import os
 import sys
@@ -111,6 +112,7 @@ def run_core(
     / --service dispatch can run from the embed without analyzer deps — see the
     module-top comment block.
     """
+    from orchestrator.admin_server import AdminServer
     from orchestrator.config import load_config
     from orchestrator.config_watcher import ConfigWatcher
     from orchestrator.ctl_server import CtlServer
@@ -123,6 +125,9 @@ def run_core(
     log.info("Starting DLP orchestrator (%s)", "foreground" if foreground else "service")
 
     _maybe_install_slow_test_hook()
+
+    start_monotonic = time.monotonic()
+    start_wall = time.time()
 
     config = load_config(config_path)
     pm = PolicyManager(config)
@@ -137,12 +142,22 @@ def run_core(
     raw_cell: dict[str, dict] = {"raw": config.raw}
     in_use_data_pipe = config.data_pipe
     in_use_ctl_pipe = config.ctl_pipe
+    in_use_admin_pipe = config.admin_pipe
 
     ctl_server = CtlServer(config, raw_provider=lambda: raw_cell["raw"])
+
+    if config_path is None:
+        watcher_path = Path(__file__).parent.parent / "config.yaml"
+    else:
+        watcher_path = Path(config_path)
+
+    # Phase F: track the last config (re)load wall time for dlp-ctl status.
+    config_state = {"reloaded_wall": start_wall}
 
     def _handle_config_change(new_raw: dict) -> None:
         new_data_pipe = new_raw.get("data_pipe")
         new_ctl_pipe = new_raw.get("ctl_pipe")
+        new_admin_pipe = new_raw.get("admin_pipe")
         if new_data_pipe != in_use_data_pipe:
             log.warning(
                 "data_pipe change requires restart; keeping %r (yaml wanted %r)",
@@ -153,16 +168,19 @@ def run_core(
                 "ctl_pipe change requires restart; keeping %r (yaml wanted %r)",
                 in_use_ctl_pipe, new_ctl_pipe,
             )
+        if new_admin_pipe != in_use_admin_pipe:
+            log.warning(
+                "admin_pipe change requires restart; keeping %r (yaml wanted %r)",
+                in_use_admin_pipe, new_admin_pipe,
+            )
         # Override the unchangeable fields back to in-use values so subscribers
         # see an internally-consistent snapshot. Other field changes pass through.
-        new_raw = {**new_raw, "data_pipe": in_use_data_pipe, "ctl_pipe": in_use_ctl_pipe}
+        new_raw = {**new_raw, "data_pipe": in_use_data_pipe,
+                   "ctl_pipe": in_use_ctl_pipe, "admin_pipe": in_use_admin_pipe}
         raw_cell["raw"] = new_raw
+        config_state["reloaded_wall"] = time.time()
         ctl_server.broadcast()
 
-    if config_path is None:
-        watcher_path = Path(__file__).parent.parent / "config.yaml"
-    else:
-        watcher_path = Path(config_path)
     config_watcher = ConfigWatcher(watcher_path, on_change=_handle_config_change)
     config_watcher.start()
 
@@ -208,6 +226,53 @@ def run_core(
         # start_session / stop_session on logon / logoff.
         ready_callback(supervisor)
 
+    # ── Phase F: admin-pipe (dlp-ctl status / reload) ──
+    def _iso(epoch: float) -> str:
+        return datetime.datetime.fromtimestamp(
+            epoch, datetime.timezone.utc).isoformat()
+
+    def _status_provider() -> dict:
+        return {
+            "uptime_seconds": round(time.monotonic() - start_monotonic, 1),
+            "started_at": _iso(start_wall),
+            "service_mode": not foreground,
+            "inflight": dispatcher.inflight_counts(),
+            "last_config_reload": _iso(config_state["reloaded_wall"]),
+            "last_policy_reload": _iso(pm.last_reload_time()),
+            "children": supervisor.status_snapshot() if supervisor is not None else {},
+        }
+
+    def _reload_callback() -> dict:
+        # Force-reload (Option A): unconditionally re-apply BOTH files and report
+        # what was applied. The file-watchers handle automatic apply on edit;
+        # this manual command is the authoritative "apply now" (and the hook the
+        # future central server calls after pushing config/policies). Per-file
+        # failures are returned in `errors`.
+        reloaded: list[str] = []
+        errors: dict[str, str] = {}
+        if pm.force_reload():
+            reloaded.append("policies")
+        else:
+            errors["policies"] = "rebuild failed; kept previous policies (see dlp-agent.log)"
+        try:
+            import yaml
+            with open(watcher_path, encoding="utf-8") as f:
+                new_raw = yaml.safe_load(f)
+            _handle_config_change(new_raw)  # re-applies + re-broadcasts
+            reloaded.append("config")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reload: config reload failed: %s", exc)
+            errors["config"] = str(exc)
+        result: dict = {"reloaded": reloaded}
+        if errors:
+            result["errors"] = errors
+        return result
+
+    admin_server = AdminServer(config, _status_provider, _reload_callback)
+    admin_thread = threading.Thread(
+        target=admin_server.run, daemon=True, name="admin-server")
+    admin_thread.start()
+
     try:
         # Block until SvcStop sets stop_event, the pipe server dies, or (foreground)
         # Ctrl+C raises KeyboardInterrupt. The 0.5 s tick lets KeyboardInterrupt fire.
@@ -218,15 +283,23 @@ def run_core(
         stop_event.set()
     finally:
         # Stop children FIRST so Controller releases the alive mutex (hooks
-        # deactivate) while the orchestrator's pipes are still up.
+        # deactivate) while the orchestrator's pipes are still up. (Proxy is
+        # restored inside supervisor.stop_all()/stop_session().)
         if supervisor is not None:
             supervisor.stop_all()
         server.stop()
         ctl_server.stop()
+        admin_server.stop()
         t.join(timeout=5.0)
         ctl_thread.join(timeout=5.0)
+        admin_thread.join(timeout=5.0)
         config_watcher.stop()
-        dispatcher.shutdown(wait=True)
+        # Phase F: bounded drain instead of an unbounded shutdown(wait=True), so
+        # a stuck analysis can't hang SvcStop past the SCM timeout.
+        abandoned = dispatcher.drain(config.drain_timeout_seconds)
+        if abandoned:
+            log.warning("drain: %d analyses abandoned after %ss",
+                        abandoned, config.drain_timeout_seconds)
         pm.stop()
         log.info("Orchestrator stopped cleanly.")
 

@@ -24,6 +24,49 @@ $GetPipUrl = "https://bootstrap.pypa.io/get-pip.py"
 $GetPip = Join-Path $env:TEMP "get-pip.py"
 $EmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip"
 
+function Get-FileWithRetry {
+    # Robust download. python.org's Fastly CDN sometimes forcibly closes an
+    # Invoke-WebRequest connection mid-transfer ("An existing connection was
+    # forcibly closed by the remote host"). curl.exe (ships with Windows 10/11)
+    # negotiates TLS/HTTP and retries transient resets far more reliably; we fall
+    # back to Invoke-WebRequest, and finally to reusing a file you downloaded by
+    # hand (browser) to the same path.
+    param(
+        [Parameter(Mandatory)] [string]$Uri,
+        [Parameter(Mandatory)] [string]$OutFile,
+        [int]$MinBytes = 1,
+        [int]$Retries = 4
+    )
+    if ((Test-Path $OutFile) -and ((Get-Item $OutFile).Length -ge $MinBytes)) {
+        Write-Host ("  Reusing existing {0} ({1:N0} bytes)" -f $OutFile, (Get-Item $OutFile).Length)
+        return
+    }
+    if (Test-Path $OutFile) { Remove-Item $OutFile -Force }   # drop a partial
+
+    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+    if (Test-Path $curl) {
+        Write-Host "  curl.exe $Uri"
+        & $curl -L --fail --retry $Retries --retry-delay 3 --retry-all-errors -o $OutFile $Uri
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $OutFile) -and (Get-Item $OutFile).Length -ge $MinBytes) { return }
+        Write-Warning "curl.exe failed (exit=$LASTEXITCODE); falling back to Invoke-WebRequest."
+        if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
+    }
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12  # helps Windows PowerShell 5.1
+    for ($i = 1; $i -le $Retries; $i++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+            if ((Test-Path $OutFile) -and (Get-Item $OutFile).Length -ge $MinBytes) { return }
+        } catch {
+            Write-Warning "Download attempt $i/$Retries failed: $($_.Exception.Message)"
+        }
+        if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
+        Start-Sleep -Seconds (2 * $i)
+    }
+    throw ("Failed to download $Uri after $Retries attempts. If you are behind a VPN/proxy/firewall, " +
+           "download it in a browser to '$OutFile' and re-run this script (it reuses an existing file).")
+}
+
 Write-Host "Phase D Python embeddable prep — version $PythonVersion" -ForegroundColor Cyan
 Write-Host "  RepoRoot:  $RepoRoot"
 Write-Host "  EmbedDir:  $EmbedDir"
@@ -34,7 +77,7 @@ if (Test-Path $EmbedDir) {
 }
 
 Write-Host "Downloading embeddable distribution ..."
-Invoke-WebRequest -Uri $EmbedUrl -OutFile $EmbedZip -UseBasicParsing
+Get-FileWithRetry -Uri $EmbedUrl -OutFile $EmbedZip -MinBytes 5000000   # embed is ~10 MB
 
 Write-Host "Extracting to $EmbedDir ..."
 Expand-Archive -Path $EmbedZip -DestinationPath $EmbedDir -Force
@@ -62,7 +105,7 @@ if ($pth -notmatch '(?m)^\.\.\s*$') {
 Set-Content -Path $PthFile.FullName -Value $pth -NoNewline -Encoding ASCII
 
 Write-Host "Downloading get-pip.py ..."
-Invoke-WebRequest -Uri $GetPipUrl -OutFile $GetPip -UseBasicParsing
+Get-FileWithRetry -Uri $GetPipUrl -OutFile $GetPip -MinBytes 50000   # get-pip.py is ~2 MB
 
 Write-Host "Bootstrapping pip ..."
 $PyExe = Join-Path $EmbedDir "python.exe"

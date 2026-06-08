@@ -143,6 +143,25 @@ pause
 '@
 Set-Content -Path (Join-Path $BundleDir "uninstall.cmd") -Value $UninstallCmd -Encoding ASCII
 
+# ── dlp-ctl.cmd (admin CLI wrapper) ──────────────────────────────────────────
+# Prefer the INSTALLED python + config (the running service reads admin_pipe from
+# %ProgramFiles%\DLP\config.yaml), so dlp-ctl works even after the bundle folder
+# is deleted, as long as it is run from inside the bundle. Fall back to the
+# bundle embed if the agent isn't installed yet. Run elevated for status/reload.
+$DlpCtlCmd = @'
+@echo off
+REM DLP Agent admin CLI: status | reload | tail. Run elevated for status/reload.
+setlocal
+set "PF=%ProgramFiles%\DLP"
+if exist "%PF%\python\python.exe" (
+  "%PF%\python\python.exe" -m orchestrator.ctl --config "%PF%\config.yaml" %*
+) else (
+  "%~dp0python-embed\python.exe" -m orchestrator.ctl --config "%~dp0config.yaml" %*
+)
+exit /b %ERRORLEVEL%
+'@
+Set-Content -Path (Join-Path $BundleDir "dlp-ctl.cmd") -Value $DlpCtlCmd -Encoding ASCII
+
 $Readme = @'
 DLP Endpoint Agent — deploy bundle
 ==================================
@@ -162,15 +181,26 @@ To install (elevated):
   1. Copy this whole folder (or unzip DLP.zip) anywhere on the machine.
   2. Right-click install.cmd  ->  "Run as administrator".
      It installs into %ProgramFiles%\DLP, registers the DLPAgent service
-     (start type: demand), the mitmproxy CA, the proxy redirect, and the
-     "Transfer to USB (DLP Protected)" shell extension.
-  3. Start the agent (PowerShell):   Start-Service DLPAgent
+     (start type: auto — starts at boot), the mitmproxy CA, the proxy redirect,
+     and the "Transfer to USB (DLP Protected)" shell extension.
+  3. The installer starts the service immediately (and it auto-starts on boot).
+     Verify it is Running:
+       Get-Service DLPAgent
+     If it is Stopped, start it with:  Start-Service DLPAgent
      (NOTE: bare `sc start` in PowerShell is an alias for Set-Content, NOT the
       service controller — use Start-Service, or sc.exe start DLPAgent.)
      Session-aware children spawn per user session; logon/logoff add/remove them.
-  4. Check it's working:
-       Get-Service DLPAgent
+  4. Check the log:
        Get-Content "$env:ProgramData\DLP\logs\dlp-agent.log" -Tail 40
+
+ADMIN CLI:
+  The installer adds %ProgramFiles%\DLP to PATH, so from a NEW (elevated) shell:
+    dlp-ctl status          show uptime, in-flight counts, child states
+    dlp-ctl reload          reload config.yaml / policies.yaml
+    dlp-ctl tail --follow   stream the structured decision log (events.jsonl)
+  (Or run .\dlp-ctl.cmd status from %ProgramFiles%\DLP if PATH hasn't refreshed.)
+  status / reload require an elevated prompt; per-decision audit log:
+    %ProgramData%\DLP\logs\events.jsonl
 
 To uninstall (elevated):
   Run uninstall.cmd as administrator (reverses everything; safe to re-run).

@@ -28,6 +28,7 @@ from orchestrator.installer import (
     Step,
     _drive_install,
     _drive_uninstall,
+    _step_install_ctl_wrapper,
     build_bundle_config,
 )
 
@@ -95,6 +96,23 @@ def _minimal_context(tmp_path: Path) -> InstallContext:
         service_display="DLPAgent (test)",
         service_desc="test",
     )
+
+
+def test_install_ctl_wrapper_writes_and_undoes(tmp_path: Path) -> None:
+    ctx = _minimal_context(tmp_path)
+    ctx.install_root.mkdir(parents=True, exist_ok=True)
+    step = _step_install_ctl_wrapper()
+
+    payload = step.do(ctx)
+    wrapper = ctx.install_root / "dlp-ctl.cmd"
+    assert wrapper.exists()
+    body = wrapper.read_text(encoding="ascii")
+    assert "python\\python.exe" in body
+    assert "-m orchestrator.ctl" in body
+
+    step.undo(ctx, payload)
+    assert not wrapper.exists()
+    step.undo(ctx, payload)  # idempotent — no error when already gone
 
 
 def _record_step(name: str, log: list[str], fail: bool = False) -> Step:

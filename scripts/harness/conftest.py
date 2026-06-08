@@ -25,6 +25,15 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _FIXTURE_POLICIES_DIR = Path(__file__).parent / "fixture_policies"
 
+# Phase F: unit tests import orchestrator.dispatcher / policy_manager directly,
+# which pull in analyzer.engine. engine.py uses a bare `from policy import ...`,
+# so analyzer/ must be on sys.path (the orchestrator subprocess does this in
+# __main__.py; do the same here for in-process imports). Repo root is added too
+# so `import orchestrator` / `import analyzer` resolve regardless of invocation dir.
+for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "analyzer")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 
 def _load_fixture_policy(name: str) -> str:
     return (_FIXTURE_POLICIES_DIR / name).read_text(encoding="utf-8")
@@ -38,6 +47,7 @@ class Orchestrator:
     log_dir: Path
     tmp_dir: Path
     proc: subprocess.Popen
+    admin_pipe: str = ""
 
     def write_policies(self, yaml_content: str, atomic: bool = True) -> None:
         """Replace policies.yaml. atomic=True uses os.replace (write-temp + rename)."""
@@ -109,6 +119,7 @@ def make_orchestrator():
 
         pipe_name = rf"\\.\pipe\dlp_test_{os.getpid()}_{run_id}"
         ctl_pipe_name = rf"\\.\pipe\dlp_test_ctl_{os.getpid()}_{run_id}"
+        admin_pipe_name = rf"\\.\pipe\dlp_test_admin_{os.getpid()}_{run_id}"
         policies_path = tmp_dir / "policies.yaml"
         policies_path.write_text(policies_yaml, encoding="utf-8")
 
@@ -124,6 +135,7 @@ def make_orchestrator():
         config = {
             "data_pipe": pipe_name,
             "ctl_pipe": ctl_pipe_name,
+            "admin_pipe": admin_pipe_name,
             "pools": pools,
             "limits": {"max_clipboard_bytes": 1048576, "max_file_bytes": 104857600},
             "supervisor": {
@@ -172,6 +184,13 @@ def make_orchestrator():
         # The harness tests pipe/dispatch/config-watch behavior, not the supervised
         # children (which are exercised by test_supervisor.py).
         env["DLP_SUPERVISOR_DISABLED"] = "1"
+        # Isolate each orchestrator's logs to its own tmp dir. configure_logging
+        # derives the log dir from %PROGRAMDATA%; without this every harness
+        # orchestrator writes the SHARED %PROGRAMDATA%\DLP\logs\{dlp-agent.log,
+        # events.jsonl}, so a single stuck/force-killed process's file handle can
+        # cascade into "permission denied" startup crashes across the whole suite.
+        # (The supervisor — the only other PROGRAMDATA consumer — is disabled above.)
+        env["PROGRAMDATA"] = str(tmp_dir)
         if extra_env:
             env.update({k: str(v) for k, v in extra_env.items()})
 
@@ -198,6 +217,7 @@ def make_orchestrator():
             log_dir=log_dir,
             tmp_dir=tmp_dir,
             proc=proc,
+            admin_pipe=admin_pipe_name,
         )
         spawned.append(orch)
         return orch

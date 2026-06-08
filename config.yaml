@@ -4,6 +4,9 @@
 # ── Shared infrastructure (consumed by orchestrator AND every client) ──
 data_pipe: "\\\\.\\pipe\\dlp_agen"
 ctl_pipe:  "\\\\.\\pipe\\dlp_agent_ctl"
+# Phase F: Administrators-only request/response channel for the dlp-ctl CLI
+# (status / reload). NOT served to the interceptor clients. Restart-only.
+admin_pipe: "\\\\.\\pipe\\dlp_agent_admin"
 
 # ── Orchestrator-only ──
 pools:
@@ -20,6 +23,9 @@ supervisor:                          # Consumed in Phase C; harmless to keep now
   max_restarts: 3
   restart_window_seconds: 60
   stable_uptime_reset_seconds: 60
+
+service:                             # Phase F: graceful drain on stop.
+  drain_timeout_seconds: 8           # SvcStop waits up to this for in-flight analyses
 
 paths:
   mitmdump_exe: ""                   # auto-detect in venv if empty
@@ -45,6 +51,7 @@ install:
   state_dir: ""                                 # empty → %PROGRAMDATA%\DLP\state
   mitmproxy_confdir: ""                         # empty → %PROGRAMDATA%\DLP\mitmproxy
   service_name: "DLPAgent"
+  service_start_type: "auto"                    # Phase F (Q-E4): auto-start at boot ("auto" | "demand")
   service_display_name: "DLP Endpoint Agent"
   service_description: "Endpoint DLP orchestrator. Runs as LocalSystem, supervises the interceptor processes across user sessions, and routes intercepted data to the content analyzer."
   ca_thumbprint_file: "installed_ca.txt"        # relative to state_dir

@@ -35,6 +35,13 @@ class OrchestratorConfig:
     transfer_agent_exe: str = ""
     shell_extension_dll: str = ""
     payload_dll: str = ""
+    # Phase F additions. admin_pipe is the Administrators-only request/response
+    # control channel for dlp-ctl (see admin_server.py). drain_timeout_seconds
+    # bounds how long SvcStop waits for in-flight analyses before abandoning
+    # them. Defaulted so pre-Phase-F fixtures that build the dataclass directly
+    # don't need to enumerate them.
+    admin_pipe: str = "\\\\.\\pipe\\dlp_agent_admin"
+    drain_timeout_seconds: int = 8
     # Whole parsed yaml. Only the ctl-pipe broadcaster reads this — every other
     # orchestrator module reads the flat fields above. Keeping the raw tree lets
     # us project per-component sections (clipboard / browser / peripheral_storage)
@@ -53,6 +60,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     supervisor = raw.get("supervisor", {})
     paths = raw.get("paths", {})
     proxy = raw.get("proxy", {})
+    service = raw.get("service", {})
 
     return OrchestratorConfig(
         data_pipe=raw["data_pipe"],
@@ -89,5 +97,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
             "payload_dll",
             "interceptors/peripheral_storage/Payload/x64/Debug/Payload.dll",
         ),
+        admin_pipe=raw.get("admin_pipe", "\\\\.\\pipe\\dlp_agent_admin"),
+        drain_timeout_seconds=service.get("drain_timeout_seconds", 8),
         raw=raw,
     )

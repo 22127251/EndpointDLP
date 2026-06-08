@@ -1,6 +1,6 @@
 policies:
 
-  # --- Chặn đưa thẻ VISA vào Browser ---
+  # --- Chặn đưa thẻ VISA ở cả 3 kênh ---
   - id: block_visa_all_channels_with_context
     name: Block Visa Card in on all channels with Context
     channels: [browser, clipboard, peripheral_storage]
@@ -17,7 +17,7 @@ policies:
       - "visa"
     context_range: 120
 
-  # --- Chặn đưa CCCD vào Browser ---
+  # --- Chặn đưa CCCD ở cả 3 kênh ---
   - id: block_cccd_all_channels_with_context
     name: Block Vietnamese Citizen ID (CCCD) in on all channels with Context
     channels: [browser, clipboard, peripheral_storage]
@@ -36,6 +36,7 @@ policies:
       - "định danh cá nhân"
     context_range: 200
 
+# --- Chặn đưa CCCD vào Clipboard mà không có từ khóa ngữ cảnh ---
   - id: block_cccd_clipboard_no_context
     name: Block Vietnamese Citizen ID (CCCD) in Clipboard with no Context words
     channels: [clipboard]
@@ -63,7 +64,7 @@ policies:
   #   context_words: []
   #   context_range: 0
 
-  # --- Cho phép và Ghi Log (Allow & Log) Số điện thoại vào Browser ---
+  # --- Cho phép và Ghi Log (Allow & Log) Số điện thoại ở cả 3 kênh ---
   - id: log_phone_numbers_browser
     name: Log Phone Numbers in Browser
     channels: [browser, clipboard, peripheral_storage]
