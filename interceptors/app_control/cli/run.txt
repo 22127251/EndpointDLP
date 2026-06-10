@@ -1,0 +1,1 @@
+python add-wdacwrule.py -i base.xml -o output.xml --allow-paths 'C:\Users\agent1\Downloads\7z2601-x64.exe' 'C:\Users\agent1\Downloads\winrar-x64-722.exe' 'C:\Users\agent1\Downloads\Thunderbird Setup 151.0.1.exe' --deny-paths "C:\Program Files\WindowsApps\Microsoft.OutlookForWindows_1.2026.520.400_x64__8wekyb3d8bbwe\olk.exe" -c --deploy
