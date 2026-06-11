@@ -45,18 +45,21 @@ Deliverable: a results matrix (command, exit code, works/doesn't) + sample event
 
 Risks: ConfigCI `.mum` absent on some servicing states; 3077 schema variance; GUID format pickiness in `--remove-policy`.
 
-### Phase AC-2 — Python WDAC policy engine (pure logic, harness-testable)
+### Phase AC-2 — Python WDAC policy engine (pure logic, harness-testable) ✅ COMPLETED (2026-06-11)
+
+**Outcome:** shipped `orchestrator/app_control/{__init__,policy_xml,hashing,selfprotect,manifest}.py` + relocated `base.xml`, tests `scripts/harness/test_app_control_policy.py` (34 cases), and keeper builder `scripts/build-ac2-policies.py`. Harness **69 passed / 3 skipped** (35 prior + 34 new); real `New-CIPolicyRule -Level Hash` returns the 4 hashes; every generated policy (FileAttrib + FilePath self-protect + Hash) compiles clean with `ConvertFrom-CIPolicy`. **Self-protect redesigned from per-binary FileAttrib/Hash to two WDAC FilePath rules** — `<install_root>\*` + `C:\Program Files\dotnet\*` — both admin-only-writable so honored without option 18; robust to analyzer-dep churn and no mass hashing. **Web-verified + VM-confirmed that a DefaultWindows-style base (which `base.xml` is) does NOT trust the framework-dependent .NET runtime** (signed Microsoft-Code-Signing-PCA, not the Windows EKU), so the dotnet FilePath rule is mandatory: the VM self-protect smoke showed Policy B (install_root only) leaves the .NET interceptor (controller child) blocked with a `…\dotnet\…` 3077 while Policy C (install_root + dotnet) runs it; clean `citool --remove-policy` back to baseline. (The AC-1 OneDrive/olk blocks were explicit P2 deny rules — not evidence about base coverage.) Hash fallback resolved to a `New-CIPolicyRule -Level Hash` shell-out (page hashes too risky to reimplement). Detailed plan: `code-base-brief-this-vectorized-pretzel.md`.
 
 **Goal:** all XML rule manipulation + validation as pure Python, no OS side effects, fully pytest-covered.
 
-New files: `orchestrator/app_control/{policy_xml.py, selfprotect.py, manifest.py, base.xml}` (+ `__init__.py`); tests `scripts/harness/test_app_control_policy.py`.
+New files: `orchestrator/app_control/{policy_xml.py, hashing.py, selfprotect.py, manifest.py, base.xml}` (+ `__init__.py`); tests `scripts/harness/test_app_control_policy.py`; keeper builder `scripts/build-ac2-policies.py`.
 
-- `policy_xml.py`: port of `Add-WDACRule.ps1` — load `base.xml` template, PE version-info via `win32api.GetFileVersionInfo` (default level InternalName, parity with the PS1), insert Allow/Deny FileRules + FileRuleRefs into UMCI SigningScenario 12, `ID_ALLOW_A_n`/`ID_DENY_D_n` auto-numbering with dedup, VersionEx bump (WDAC refuses VersionEx ≤ loaded), hash-rule fallback (decision 5), installer-like-name warning (decision 8b).
-- `selfprotect.py`: generates the agent-binary allow rules from the install layout (python.exe, interceptor exes, TransferAgent, etc.).
+- `policy_xml.py`: port of `Add-WDACRule.ps1` — load `base.xml` template, PE version-info via `win32api.GetFileVersionInfo` (default level InternalName, parity with the PS1), insert Allow/Deny FileRules + FileRuleRefs into UMCI SigningScenario 12, `ID_ALLOW_A_n`/`ID_DENY_D_n` auto-numbering with dedup, VersionEx bump (WDAC refuses VersionEx ≤ loaded), installer-like + generic-name warnings (decision 8b + AC-1 `Client Application` hazard). Adds **FilePath** Allow/Deny rules (beyond the PS1) and Hash-rule insertion (values from `hashing.py`).
+- `hashing.py`: the one isolated, mockable seam — shells out to `New-CIPolicyRule -Level Hash` and lifts the four `<Allow Hash>` values; used only for the operator's arbitrary no-metadata files (decision 5), never for self-protect.
+- `selfprotect.py`: emits the agent's self-coverage as two **FilePath** allow rules — `<install_root>\*` and `C:\Program Files\dotnet\*` (the framework-dependent .NET runtime, which `base.xml` does NOT trust) — plus the decision-3 validator `policy_covers_required_paths`. FilePath on admin-only-writable dirs avoids mass-hashing the many native analyzer deps.
 - `manifest.py`: inbox manifest schema + validator suite — SHA-256 hash check, PolicyID↔`.cip` filename match, VersionEx > currently-deployed, self-protect coverage check (decision 3). Pure functions shared by orchestrator runtime and tests.
 - `base.xml` relocates here as package data (the installer copies `orchestrator/` wholesale, so it ships for free).
 
-Open question for the phase session: WDAC Hash rules use the **Authenticode/PE CI hash, not flat SHA-256** — implement Authenticode hashing in Python (keeps the no-PowerShell property; cross-check once against a `New-CIPolicyRule -Level Hash` sample on the VM) vs shelling out to PS for just those files.
+**RESOLVED (the phase-session open question):** WDAC Hash rules use the Authenticode/PE CI hash with **four values/file** (SHA1/SHA256 Authenticode + SHA1/SHA256 page hash); reimplementing the page hashes in Python was judged too risky, so `hashing.py` shells out to `New-CIPolicyRule -Level Hash` (XML insertion stays pure + unit-tested with injected hashes). Self-protect avoids hashing entirely via FilePath rules.
 
 Risks: sipolicy element-ordering strictness; behavioral parity with the PS1 (cross-check: Python-built XML must compile with `ConvertFrom-CIPolicy` and diff semantically clean against PS1 output for identical inputs).
 
@@ -103,6 +106,8 @@ Formal decision-8 acceptance on the VM: (a) copied-exe-built `.cip` governs orig
 
 Risks: DISM during install on a fresh image (servicing stack busy → retry); uninstall sequencing — a deployed deny must never block the uninstaller itself (self-protect rules + base.xml's Microsoft-signed allowance cover the toolchain).
 
+**AC-2 carry-forward (AC-3 + AC-5):** every deployed/standalone-built policy **must** include the dotnet FilePath self-protect rule (`C:\Program Files\dotnet\*`) — the framework-dependent .NET runtime is NOT trusted by `base.xml`, so without it the C# interceptors are blocked under enforcement (VM-confirmed in AC-2). The installer must keep `<install_root>` admin-only-writable so the FilePath self-protect rules stay honored; the AC-3 deployer + `manifest.py` validator already reject any push that lacks the required self-protect FilePaths.
+
 Verification (clean-VM acceptance run): package → install → `citool --list-policies` shows **no** DLP policy + channel idle → full AC-4 operator loop → block events in `events.jsonl` → disable → re-apply → uninstall → policy gone, dirs gone, reinstall succeeds. `pytest scripts/harness` stays green throughout (baseline: 35 passed / 3 skipped + 10 C#).
 
 ## Web-verified facts (this session)
@@ -114,7 +119,7 @@ Verification (clean-VM acceptance run): package → install → `citool --list-p
 
 ## Cross-cutting open questions (settle in per-phase sessions)
 
-1. **AC-2:** Authenticode-hash-in-Python vs `New-CIPolicyRule -Level Hash` shell-out for the no-metadata fallback.
+1. ~~**AC-2:** Authenticode-hash-in-Python vs `New-CIPolicyRule -Level Hash` shell-out for the no-metadata fallback.~~ **RESOLVED (AC-2): shell-out** — four hashes/file incl. page hashes are too risky to reimplement, so `hashing.py` invokes `New-CIPolicyRule -Level Hash` (isolated + mocked in tests). Self-protect sidesteps hashing entirely via FilePath rules.
 2. ~~**AC-1 output → AC-3:** exact 3077/8028 field names on build 26200.~~ **RESOLVED (AC-1):** see `spike-results/RESULTS.md` "Pinned contracts" — filter on `PolicyGUID`; field names contain spaces; 3076 is the audit event; MSIX blocks are 3077 + `PackageFamilyName`.
 3. **AC-4:** admin-server callback wiring shape (more positional callbacks vs a command dict).
 4. **AC-5:** `appcontrol_policy_guard` undo placement relative to service-stop/file-removal in the step list.
