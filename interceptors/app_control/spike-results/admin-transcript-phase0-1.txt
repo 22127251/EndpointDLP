@@ -1,0 +1,143 @@
+Windows PowerShell
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Install the latest PowerShell for new features and improvements! https://aka.ms/PSWindows
+
+PS C:\WINDOWS\system32> citool --list-policies --json | Out-File C:\spike\artifacts\citool-json\baseline.json
+PS C:\WINDOWS\system32> C:\spike\scripts\spike-versioninfo-dump.ps1 -OutCsv C:\spike\artifacts\versioninfo\targets.csv -Paths "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe","C:\Program Files\Microsoft OneDrive\OneDrive.exe","C:\Program Files\7-Zip","C:\Program Files\WinRAR","C:\Program Files\VMware\VMware Tools","C:\spike\tools\PsExec64.exe","C:\Users\agent1\Downloads\7z2601-x64.exe","C:\Users\agent1\Downloads\winrar-x64-722.exe"
+C:\spike\scripts\spike-versioninfo-dump.ps1 : File C:\spike\scripts\spike-versioninfo-dump.ps1 cannot be loaded
+because running scripts is disabled on this system. For more information, see about_Execution_Policies at
+https:/go.microsoft.com/fwlink/?LinkID=135170.
+At line:1 char:1
++ C:\spike\scripts\spike-versioninfo-dump.ps1 -OutCsv C:\spike\artifact ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : SecurityError: (:) [], PSSecurityException
+    + FullyQualifiedErrorId : UnauthorizedAccess
+PS C:\WINDOWS\system32> C:\spike\tools\PsExec64.exe -accepteula -s cmd /c "copy /y %windir%\PSEXESVC.exe C:\spike\tools\PSEXESVC-copy.exe"
+
+PsExec v2.43 - Execute processes remotely
+Copyright (C) 2001-2023 Mark Russinovich
+Sysinternals - www.sysinternals.com
+
+
+        1 file(s) copied.
+cmd exited on VM-WIN with error code 0.
+PS C:\WINDOWS\system32> Get-ChildItem $Env:SystemRoot\servicing\Packages\*ConfigCI*.mum | % { dism /online /norestart /add-package:"$($_.FullName)" }
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-Package~31bf3856ad364e35~amd64~en-GB~10.0.26100.1
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-Package~31bf3856ad364e35~amd64~~10.0.26100.1591
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-Package~31bf3856ad364e35~amd64~~10.0.26100.7309
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-Package~31bf3856ad364e35~amd64~~10.0.26100.8246
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-Package~31bf3856ad364e35~amd64~~10.0.26100.8521
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-WOW64-Package~31bf3856ad364e35~amd64~en-GB~10.0.26100.1
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-WOW64-Package~31bf3856ad364e35~amd64~~10.0.26100.1591
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-WOW64-Package~31bf3856ad364e35~amd64~~10.0.26100.7309
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-WOW64-Package~31bf3856ad364e35~amd64~~10.0.26100.7705
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Onecore-WOW64-Package~31bf3856ad364e35~amd64~~10.0.26100.8521
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Package~31bf3856ad364e35~amd64~en-GB~10.0.26100.1
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Package~31bf3856ad364e35~amd64~~10.0.26100.1
+[==========================100.0%==========================]
+The operation completed successfully.
+
+Deployment Image Servicing and Management tool
+Version: 10.0.26100.5074
+
+Image Version: 10.0.26200.8457
+
+Processing 1 of 1 - Adding package Microsoft-Windows-ConfigCI-Package~31bf3856ad364e35~amd64~~10.0.26100.3323
+[==========================100.0%==========================]
+The operation completed successfully.
+PS C:\WINDOWS\system32>

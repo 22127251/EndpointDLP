@@ -1,0 +1,52 @@
+# AC-1 P2 "deny" policy allow list = p1-allow.txt MINUS the five 7-Zip copy lines.
+# Omitting the installed-7-Zip rules while keeping the INSTALLER rule creates the
+# 8b condition: 7z2601-x64.exe (installer) still runs, installed 7zFM.exe is blocked.
+# Paths must be UNQUOTED. Sync any Phase-0 FIX-ME additions with p1-allow.txt.
+
+# --- WinRAR: COPIES of the installed files (stays allowed: the control app).
+C:\spike\copies\WinRAR.exe
+C:\spike\copies\Rar.exe
+C:\spike\copies\RarExt.dll
+
+# --- Installers (8b mismatch fixtures).
+C:\Users\KitchenGun\Downloads\7z2601-x64.exe
+C:\Users\KitchenGun\Downloads\winrar-x64-722.exe
+
+# --- python-embed: explicit file list (see p1-allow.txt for rationale).
+C:\spike\python-embed\python.exe
+C:\spike\python-embed\python313.dll
+C:\spike\python-embed\python3.dll
+C:\spike\python-embed\vcruntime140.dll
+C:\spike\python-embed\vcruntime140_1.dll
+C:\spike\python-embed\Lib\site-packages\pywin32_system32\pywintypes313.dll
+C:\spike\python-embed\Lib\site-packages\win32\win32evtlog.pyd
+C:\spike\python-embed\Lib\site-packages\win32\win32event.pyd
+C:\spike\python-embed\Lib\site-packages\win32\win32api.pyd
+
+# --- PsExec.
+C:\spike\tools\PsExec64.exe
+C:\spike\tools\PSEXESVC-copy.exe
+
+# --- VMware Tools (same set as p1-allow.txt; see exclusion note there).
+C:\Program Files\VMware\VMware Tools\7za.exe
+C:\Program Files\VMware\VMware Tools\deployPkg.dll
+C:\Program Files\VMware\VMware Tools\gio-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\glib-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\gmodule-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\gobject-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\gthread-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\guestStoreClient.dll
+C:\Program Files\VMware\VMware Tools\hgfs.dll
+C:\Program Files\VMware\VMware Tools\iconv.dll
+C:\Program Files\VMware\VMware Tools\intl.dll
+C:\Program Files\VMware\VMware Tools\rpctool.exe
+C:\Program Files\VMware\VMware Tools\rvmSetup.exe
+C:\Program Files\VMware\VMware Tools\vm3dservice.exe
+C:\Program Files\VMware\VMware Tools\vmtools.dll
+C:\Program Files\VMware\VMware Tools\vmtoolsd.exe
+C:\Program Files\VMware\VMware Tools\VMwareHgfsClient.exe
+C:\Program Files\VMware\VMware Tools\VMwareHostOpen.exe
+C:\Program Files\VMware\VMware Tools\VMwareNamespaceCmd.exe
+C:\Program Files\VMware\VMware Tools\VMwareResolutionSet.exe
+C:\Program Files\VMware\VMware Tools\VMwareToolboxCmd.exe
+C:\Program Files\VMware\VMware Tools\VMwareXferlogs.exe

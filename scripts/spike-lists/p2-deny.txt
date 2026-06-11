@@ -1,0 +1,12 @@
+# AC-1 P2 deny list. Both targets are Microsoft/Store-signed on purpose:
+# the test proves explicit Deny FileAttrib rules beat the base policy's signer allows.
+# Paths must be UNQUOTED, must EXIST at build time, and must be FILES not folders
+# (a folder is scanned recursively -> thousands of non-PE files -> the comma-joined
+# -DenyPaths argument overflows the ~32K command-line limit, WinError 206).
+#   - FIX-ME (runbook 0.6): confirm the OneDrive path (per-user vs Program Files).
+#     NOTE: OneDrive.exe InternalName is the GENERIC 'Client Application' - the deny
+#     rule will block ANYTHING with that InternalName. Fine on the test VM; record it.
+#   - FIX-ME (runbook 0.7): fix the Outlook package version from Get-AppxPackage,
+#     and keep the trailing \olk.exe.
+C:\Users\KitchenGun\AppData\Local\Microsoft\OneDrive\OneDrive.exe
+C:\Program Files\WindowsApps\Microsoft.OutlookForWindows_1.2025.1218.100_x64__8wekyb3d8bbwe\olk.exe

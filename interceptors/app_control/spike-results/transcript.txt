@@ -1,0 +1,120 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260610175647
+Username: VM-WIN\KitchenGun
+RunAs User: VM-WIN\KitchenGun
+Configuration Name: 
+Machine: VM-WIN (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+Process ID: 4388
+PSVersion: 5.1.26100.8457
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.8457
+BuildVersion: 10.0.26100.8457
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is C:\spike\artifacts\transcript.txt
+PS C:\WINDOWS\system32> cmd /c ver
+
+Microsoft Windows [Version 10.0.26200.8457]
+PS C:\WINDOWS\system32> citool --list-policies --json
+{"OperationResult":-2147024891}
+PS C:\WINDOWS\system32> Set-ExecutionPolicy -Scope Process Bypass -Force
+PS C:\WINDOWS\system32> C:\spike\scripts\spike-versioninfo-dump.ps1 -OutCsv C:\spike\artifacts\versioninfo\targets.csv -Paths "$env:LOCALAPPDATA\Microsoft\OneDrive\OneDrive.exe","C:\Program Files\Microsoft OneDrive\OneDrive.exe","C:\Program Files\7-Zip","C:\Program Files\WinRAR","C:\Program Files\VMware\VMware Tools","C:\spike\tools\PsExec64.exe","C:\Users\agent1\Downloads\7z2601-x64.exe","C:\Users\agent1\Downloads\winrar-x64-722.exe"
+WARNING: MISSING: C:\Program Files\Microsoft OneDrive\OneDrive.exe
+WARNING: MISSING: C:\Program Files\7-Zip
+WARNING: MISSING: C:\Program Files\WinRAR
+WARNING: MISSING: C:\spike\tools\PsExec64.exe
+WARNING: MISSING: C:\Users\agent1\Downloads\7z2601-x64.exe
+WARNING: MISSING: C:\Users\agent1\Downloads\winrar-x64-722.exe
+WARNING: EMPTY InternalName (would abort Add-WDACRule.ps1): C:\Program Files\VMware\VMware Tools\glibmm-2.68-1.dll
+WARNING: EMPTY InternalName (would abort Add-WDACRule.ps1): C:\Program Files\VMware\VMware Tools\pcre2-8.dll
+WARNING: EMPTY InternalName (would abort Add-WDACRule.ps1): C:\Program Files\VMware\VMware Tools\sigc-3.0-0.dll
+
+Path                                                              InternalName       OriginalFilename     FileVersion           SignatureStatus
+----                                                              ------------       ----------------     -----------           ---------------
+C:\Users\KitchenGun\AppData\Local\Microsoft\OneDrive\OneDrive.exe Client Application OneDrive.exe         26.088.0510.0004      Valid          
+C:\Program Files\VMware\VMware Tools\7za.exe                      7za                7za.exe              24.09                 Valid          
+C:\Program Files\VMware\VMware Tools\deployPkg.dll                deployPkg          deployPkg.dll        13.0.0 build-24572694 Valid          
+C:\Program Files\VMware\VMware Tools\gio-2.0-0.dll                libgio-2.0-0       libgio-2.0-0.dll     2.79.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\glib-2.0-0.dll               libglib-2.0-0      libglib-2.0-0.dll    2.79.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\glibmm-2.68-1.dll                               glibmm-2.68.dll      2.76.0                Valid          
+C:\Program Files\VMware\VMware Tools\gmodule-2.0-0.dll            libgmodule-2.0-0   libgmodule-2.0-0.dll 2.79.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\gobject-2.0-0.dll            libgobject-2.0-0   libgobject-2.0-0.dll 2.79.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\gthread-2.0-0.dll            libgthread-2.0-0   libgthread-2.0-0.dll 2.79.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\guestStoreClient.dll         guestStoreClient   guestStoreClient.dll 13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\hgfs.dll                     hgfs               hgfs.dll             13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\iconv.dll                    libiconv.dll       iconv.dll            1.15.0.0              Valid          
+C:\Program Files\VMware\VMware Tools\intl.dll                     intl.dll           intl.dll             0.20                  Valid          
+C:\Program Files\VMware\VMware Tools\pcre2-8.dll                                                                                Valid          
+C:\Program Files\VMware\VMware Tools\rpctool.exe                  rpctool            rpctool.exe          13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\rvmSetup.exe                 rvmSetup           rvmSetup.exe         13.0.1 build-24843032 Valid          
+C:\Program Files\VMware\VMware Tools\sigc-3.0-0.dll                                  sigc-3.0.dll         3.0.6                 Valid          
+C:\Program Files\VMware\VMware Tools\vm3dservice.exe              vm3dservice.exe    vm3dservice.exe      9.17.09.0004          Valid          
+C:\Program Files\VMware\VMware Tools\vmtools.dll                  vmtools            vmtools.dll          13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\vmtoolsd.exe                 vmtoolsd           vmtoolsd.exe         13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\VMwareHgfsClient.exe         hgfsclient         hgfsclient.exe       13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\VMwareHostOpen.exe           VMwareHostOpen     VMwareHostOpen.exe   13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\VMwareNamespaceCmd.exe       namespacetool      namespacetool.exe    13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\VMwareResolutionSet.exe      ResolutionSet      ResolutionSet.exe    13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\VMwareToolboxCmd.exe         toolbox-cmd        toolbox-cmd.exe      13.0.1.0              Valid          
+C:\Program Files\VMware\VMware Tools\VMwareXferlogs.exe           xferlogs           xferlogs.exe         13.0.1.0              Valid
+Wrote 26 row(s) to C:\spike\artifacts\versioninfo\targets.csv
+PS C:\WINDOWS\system32> Get-AppxPackage *OutlookForWindows* | fl Name,InstallLocation
+
+
+Name            : Microsoft.OutlookForWindows
+InstallLocation : C:\Program Files\WindowsApps\Microsoft.OutlookForWindows_1.2025.1218.100_x64__8wekyb3d8bbwe
+
+
+
+PS C:\WINDOWS\system32> cd C:\spike\cli
+PS C:\spike\cli> Get-Command ConvertFrom-CIPolicy
+
+CommandType     Name                                               Version    Source
+-----------     ----                                               -------    ------
+Cmdlet          ConvertFrom-CIPolicy                               1.0        ConfigCI
+
+
+PS C:\spike\cli> C:\spike\python-embed\python.exe add-wdacwrule.py -i base.xml -o policies\p1\p1.xml -a ..\lists\p1-allow.txt -c
+
+PS C:\spike\cli> C:\spike\python-embed\python.exe add-wdacwrule.py -i base.xml -o policies\p2\p2.xml -a ..\lists\p2-allow.txt -d ..\lists\p2-deny.txt -c
+
+PS C:\spike\cli> TerminatingError(TabExpansion2): "Cannot bind argument to parameter 'inputScript' because it is an empty string."
+PS C:\spike\cli> TerminatingError(TabExpansion2): "Cannot bind argument to parameter 'inputScript' because it is an empty string."
+PS C:\spike\cli>   C:\spike\python-embed\python.exe add-wdacwrule.py -i base.xml -o policies\p1\p1.xml -a ..\lists\p1-allow.txt -c
+[Allow 29/43] C:\Program Files\VMware\VMware Tools\guestStoreClient.dll
+[Allow 30/43] C:\Program Files\VMware\VMware Tools\hgfs.dll
+[Allow 31/43] C:\Program Files\VMware\VMware Tools\iconv.dll
+[Allow 32/43] C:\Program Files\VMware\VMware Tools\intl.dll
+[Allow 33/43] C:\Program Files\VMware\VMware Tools\rpctool.exe
+[Allow 34/43] C:\Program Files\VMware\VMware Tools\rvmSetup.exe
+[Allow 35/43] C:\Program Files\VMware\VMware Tools\vm3dservice.exe
+[Allow 36/43] C:\Program Files\VMware\VMware Tools\vmtools.dll
+[Allow 37/43] C:\Program Files\VMware\VMware Tools\vmtoolsd.exe
+[Allow 38/43] C:\Program Files\VMware\VMware Tools\VMwareHgfsClient.exe
+[Allow 39/43] C:\Program Files\VMware\VMware Tools\VMwareHostOpen.exe
+[Allow 40/43] C:\Program Files\VMware\VMware Tools\VMwareNamespaceCmd.exe
+[Allow 41/43] C:\Program Files\VMware\VMware Tools\VMwareResolutionSet.exe
+[Allow 42/43] C:\Program Files\VMware\VMware Tools\VMwareToolboxCmd.exe
+[Allow 43/43] C:\Program Files\VMware\VMware Tools\VMwareXferlogs.exe
+
+Inserting 43 Allow rule(s) (ID_ALLOW_A_1..ID_ALLOW_A_43) using InternalName
+
+Output : C:\spike\cli\policies\p1\p1.xml
+Version: 10.3.0.1   PolicyInfo.Id: 2026-06-10
+Added  : 43 <Allow> rule(s) + 0 <Deny> rule(s) + 43 <FileRuleRef> entry/entries
+
+Compiling binary: C:\spike\cli\policies\p1\{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}.cip
+Compiled: C:\spike\cli\policies\p1\{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}.cip
+PS C:\spike\cli> C:\spike\python-embed\python.exe add-wdacwrule.py -i base.xml -o policies\p2\p2.xml -a ..\lists\p2-allow.txt -d ..\lists\p2-deny.txt -c
+
+PS C:\spike\cli> powershell -NoProfile -ExecutionPolicy Bypass -File ..\scripts\spike-neutralize-policy.ps1 -TargetPolicyXml policies\p2\p2.xml -OutputPolicy policies\p2a\p2a.xml -VersionEx 10.3.0.5 -Mode AuditFlip -CompileBinary
+
+PS C:\spike\cli> powershell -NoProfile -ExecutionPolicy Bypass -File ..\scripts\spike-neutralize-policy.ps1 -TargetPolicyXml base.xml -OutputPolicy policies\pn\pn.xml -VersionEx 10.3.0.9 -Mode AllowAll -CompileBinary
+
+PS C:\spike\cli> C:\spike\python-embed\python.exe -c "import win32evtlog; print('ok')"
+

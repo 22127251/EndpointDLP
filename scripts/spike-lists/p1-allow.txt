@@ -1,0 +1,67 @@
+# AC-1 P1 "lifeline" allow list (paths must be UNQUOTED - add-wdacwrule.py does Path(line)).
+# All paths are VM-local (user KitchenGun). Build AFTER runbook Phase 0 fills in the
+# placeholders marked FIX-ME below.
+
+# --- 7-Zip: COPIES of the installed files (decision 8a: rules built from copies
+#     must govern the originally-installed app). Copy in runbook step 0.9.
+C:\spike\copies\7zFM.exe
+C:\spike\copies\7z.exe
+C:\spike\copies\7zG.exe
+C:\spike\copies\7-zip.dll
+C:\spike\copies\7z.dll
+
+# --- WinRAR: COPIES of the installed files.
+C:\spike\copies\WinRAR.exe
+C:\spike\copies\Rar.exe
+C:\spike\copies\RarExt.dll
+
+# --- Installers (8b mismatch fixtures; also lets the installers run under policy).
+C:\Users\KitchenGun\Downloads\7z2601-x64.exe
+C:\Users\KitchenGun\Downloads\winrar-x64-722.exe
+
+# --- python-embed: EXPLICIT file list (never folder-scan: wheel pyds like PyYAML's
+#     have empty version info and would abort the build; .py files are not PE).
+#     'Python DLL' InternalName on python313.dll also covers python3.dll + all stdlib .pyds.
+C:\spike\python-embed\python.exe
+C:\spike\python-embed\python313.dll
+C:\spike\python-embed\python3.dll
+C:\spike\python-embed\vcruntime140.dll
+C:\spike\python-embed\vcruntime140_1.dll
+C:\spike\python-embed\Lib\site-packages\pywin32_system32\pywintypes313.dll
+C:\spike\python-embed\Lib\site-packages\win32\win32evtlog.pyd
+C:\spike\python-embed\Lib\site-packages\win32\win32event.pyd
+C:\spike\python-embed\Lib\site-packages\win32\win32api.pyd
+
+# --- PsExec (runs the listener as SYSTEM). PSEXESVC-copy.exe is captured in
+#     runbook step 0.8 (FileAttrib rules travel with copies).
+C:\spike\tools\PsExec64.exe
+C:\spike\tools\PSEXESVC-copy.exe
+
+# --- VMware Tools user-mode binaries that carry InternalName (from the Phase-0 dump).
+#     EXCLUDED (empty InternalName, would abort the build): glibmm-2.68-1.dll,
+#     sigc-3.0-0.dll (both have OriginalFilename only) and pcre2-8.dll (NO version
+#     info at all - the pure decision-5 hash-fallback case; glib links it, so Tools
+#     may still degrade under enforcement - record the state at runbook 2.3).
+#     The plugins\ subfolder is also not covered.
+C:\Program Files\VMware\VMware Tools\7za.exe
+C:\Program Files\VMware\VMware Tools\deployPkg.dll
+C:\Program Files\VMware\VMware Tools\gio-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\glib-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\gmodule-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\gobject-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\gthread-2.0-0.dll
+C:\Program Files\VMware\VMware Tools\guestStoreClient.dll
+C:\Program Files\VMware\VMware Tools\hgfs.dll
+C:\Program Files\VMware\VMware Tools\iconv.dll
+C:\Program Files\VMware\VMware Tools\intl.dll
+C:\Program Files\VMware\VMware Tools\rpctool.exe
+C:\Program Files\VMware\VMware Tools\rvmSetup.exe
+C:\Program Files\VMware\VMware Tools\vm3dservice.exe
+C:\Program Files\VMware\VMware Tools\vmtools.dll
+C:\Program Files\VMware\VMware Tools\vmtoolsd.exe
+C:\Program Files\VMware\VMware Tools\VMwareHgfsClient.exe
+C:\Program Files\VMware\VMware Tools\VMwareHostOpen.exe
+C:\Program Files\VMware\VMware Tools\VMwareNamespaceCmd.exe
+C:\Program Files\VMware\VMware Tools\VMwareResolutionSet.exe
+C:\Program Files\VMware\VMware Tools\VMwareToolboxCmd.exe
+C:\Program Files\VMware\VMware Tools\VMwareXferlogs.exe

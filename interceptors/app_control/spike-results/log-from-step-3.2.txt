@@ -1,0 +1,40 @@
+user=VM-WIN$ pid=3836 python=3.13.0
+out=C:\spike\artifacts\events
+subscribed: channel='Microsoft-Windows-CodeIntegrity/Operational' mode=future query=*[System[(EventID=3033 or EventID=3076 or EventID=3077 or EventID=3089)]]
+subscribed: channel='Microsoft-Windows-AppLocker/MSI and Script' mode=future query=*[System[(EventID=8028 or EventID=8029 or EventID=8039 or EventID=8040)]]
+[08:34:44] EventID=3033 RecordID=426 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013444_3033_426.xml
+[08:34:44] EventID=3089 RecordID=427 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013444_3089_427.xml
+[08:34:44] EventID=3077 RecordID=428 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013444_3077_428.xml
+[08:34:44] EventID=3089 RecordID=429 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013444_3089_429.xml
+[08:34:45] EventID=3033 RecordID=430 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013445_3033_430.xml
+[08:34:45] EventID=3089 RecordID=431 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013445_3089_431.xml
+[08:34:45] EventID=3077 RecordID=432 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013445_3077_432.xml
+[08:34:45] EventID=3089 RecordID=433 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013445_3089_433.xml
+[08:35:01] EventID=3033 RecordID=434 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013501_3033_434.xml
+[08:35:01] EventID=3089 RecordID=435 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013501_3089_435.xml
+[08:35:01] EventID=3077 RecordID=436 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013501_3077_436.xml
+[08:35:01] EventID=3089 RecordID=437 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013501_3089_437.xml
+[08:35:15] EventID=3033 RecordID=438 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013515_3033_438.xml
+[08:35:15] EventID=3089 RecordID=439 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013515_3089_439.xml
+[08:35:15] EventID=3077 RecordID=440 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013515_3077_440.xml
+[08:35:15] EventID=3089 RecordID=441 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013515_3089_441.xml
+[08:36:12] EventID=3033 RecordID=442 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013612_3033_442.xml
+[08:36:12] EventID=3089 RecordID=443 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013612_3089_443.xml
+[08:36:12] EventID=3077 RecordID=444 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013612_3077_444.xml
+[08:36:12] EventID=3089 RecordID=445 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T013612_3089_445.xml
+[08:51:08] EventID=3076 RecordID=470 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015108_3076_470.xml
+[08:51:08] EventID=3089 RecordID=471 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015108_3089_471.xml
+[08:51:29] EventID=3076 RecordID=472 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3076_472.xml
+[08:51:29] EventID=3089 RecordID=473 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3089_473.xml
+[08:51:29] EventID=3076 RecordID=474 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3076_474.xml
+[08:51:29] EventID=3089 RecordID=475 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3089_475.xml
+[08:51:29] EventID=3076 RecordID=476 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3076_476.xml
+[08:51:29] EventID=3089 RecordID=477 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3089_477.xml
+[08:51:29] EventID=3076 RecordID=478 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3076_478.xml
+[08:51:29] EventID=3089 RecordID=479 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3089_479.xml
+[08:51:29] EventID=3076 RecordID=480 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3076_480.xml
+[08:51:29] EventID=3089 RecordID=481 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015129_3089_481.xml
+[08:51:58] EventID=3076 RecordID=482 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015158_3076_482.xml
+[08:51:58] EventID=3089 RecordID=483 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015158_3089_483.xml
+[08:52:20] EventID=3076 RecordID=484 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015220_3076_484.xml
+[08:52:20] EventID=3089 RecordID=485 (channel context='Microsoft-Windows-CodeIntegrity/Operational') -> 20260611T015220_3089_485.xml

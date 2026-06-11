@@ -1,0 +1,21 @@
+PS C:\WINDOWS\system32> Copy-Item 'C:\spike\cli\policies\p1\{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}.cip' C:\Windows\System32\CodeIntegrity\CIPolicies\Active\
+PS C:\WINDOWS\system32> citool --refresh --json
+{"OperationResult":0}
+PS C:\WINDOWS\system32> citool --list-policies --json | Out-File C:\spike\artifacts\citool-json\p1-active.json
+PS C:\WINDOWS\system32> citool --remove-policy "{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}"
+Operation Successful
+Press Enter to Continue
+
+PS C:\WINDOWS\system32> citool --list-policies --json | Out-File C:\spike\artifacts\citool-json\after-remove.json
+PS C:\WINDOWS\system32> Copy-Item 'C:\spike\cli\policies\p2\{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}.cip' C:\Windows\System32\CodeIntegrity\CIPolicies\Active\
+PS C:\WINDOWS\system32> citool --refresh --json
+{"OperationResult":0}
+PS C:\WINDOWS\system32> citool --list-policies --json | Out-File C:\spike\artifacts\citool-json\p2-active.json
+PS C:\WINDOWS\system32> Copy-Item 'C:\spike\cli\policies\p2a\{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}.cip' C:\Windows\System32\CodeIntegrity\CIPolicies\Active\
+PS C:\WINDOWS\system32> citool --refresh --json
+{"OperationResult":0}
+PS C:\WINDOWS\system32> Copy-Item 'C:\spike\cli\policies\pn\{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}.cip' C:\Windows\System32\CodeIntegrity\CIPolicies\Active\
+PS C:\WINDOWS\system32> citool --refresh --json
+{"OperationResult":0}
+PS C:\WINDOWS\system32> Remove-Item 'C:\Windows\System32\CodeIntegrity\CIPolicies\Active\{9DBAA326-CB59-4B1D-ABAF-B28412229E4A}.cip'
+PS C:\WINDOWS\system32>
