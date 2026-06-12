@@ -184,6 +184,12 @@ def make_orchestrator():
         # The harness tests pipe/dispatch/config-watch behavior, not the supervised
         # children (which are exercised by test_supervisor.py).
         env["DLP_SUPERVISOR_DISABLED"] = "1"
+        # Phase AC-3: keep the App Control channel out of the subprocess fixtures.
+        # It needs LocalSystem privilege (deploy to System32, EvtSubscribe the CI
+        # log) and is verified by its own in-process unit tests + the VM run, not by
+        # the pipe/dispatch harness. A dedicated env (not DLP_SUPERVISOR_DISABLED) so
+        # the channel and the supervisor stay decoupled.
+        env["DLP_APPCONTROL_DISABLED"] = "1"
         # Isolate each orchestrator's logs to its own tmp dir. configure_logging
         # derives the log dir from %PROGRAMDATA%; without this every harness
         # orchestrator writes the SHARED %PROGRAMDATA%\DLP\logs\{dlp-agent.log,

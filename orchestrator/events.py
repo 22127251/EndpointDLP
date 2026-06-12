@@ -60,3 +60,27 @@ def record_decision(
         rec["url"] = _clean_url(url)
     # ensure_ascii=False so Vietnamese filenames/URLs stay readable in the log.
     _log.info(json.dumps(rec, ensure_ascii=False))
+
+
+def record_app_control_event(*, event: str, outcome: str,
+                             detail: dict | None = None) -> None:
+    """Phase AC-3 — emit one App Control (WDAC) audit line to ``events.jsonl``.
+
+    Shares the ``dlp.events`` logger with :func:`record_decision` but carries an
+    app-control-shaped payload (``record_decision``'s content-analysis signature
+    doesn't fit policy deploy/remove/block records). ``event`` is the operation
+    (``"deploy"`` / ``"reject"`` / ``"remove"`` / ``"neutralize"`` / ``"block"`` /
+    ``"error"``), ``outcome`` its result (``"ok"`` / ``"rejected"`` / ``"failed"``
+    / ``"blocked"`` / ``"audit"``), and ``detail`` any structured context
+    (file/process/policy_guid for blocks; failures for rejects).
+    """
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    rec: dict = {
+        "ts": ts,
+        "channel": "app_control",
+        "event": event,
+        "outcome": outcome,
+    }
+    if detail:
+        rec.update(detail)
+    _log.info(json.dumps(rec, ensure_ascii=False))

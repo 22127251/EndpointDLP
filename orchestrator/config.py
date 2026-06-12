@@ -42,6 +42,19 @@ class OrchestratorConfig:
     # don't need to enumerate them.
     admin_pipe: str = "\\\\.\\pipe\\dlp_agent_admin"
     drain_timeout_seconds: int = 8
+    # Phase AC-3 additions — the App Control (WDAC) channel. Sourced from the
+    # app_control: section in config.yaml. Defaulted so pre-AC-3 fixtures that
+    # build the dataclass directly (test_supervisor.py:_minimal_config) don't need
+    # to enumerate them. Empty dir strings → resolved against %PROGRAMDATA%\DLP\
+    # appcontrol\<sub> in channel.py (same derivation as installer/supervisor).
+    app_control_enabled: bool = True
+    app_control_inbox_dir: str = ""
+    app_control_rejected_dir: str = ""
+    app_control_staging_dir: str = ""
+    app_control_poll_seconds: int = 3
+    app_control_reconcile_interval_seconds: int = 30
+    app_control_forward_block_events: bool = True
+    app_control_extra_paths: list = field(default_factory=list)
     # Whole parsed yaml. Only the ctl-pipe broadcaster reads this — every other
     # orchestrator module reads the flat fields above. Keeping the raw tree lets
     # us project per-component sections (clipboard / browser / peripheral_storage)
@@ -61,6 +74,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     paths = raw.get("paths", {})
     proxy = raw.get("proxy", {})
     service = raw.get("service", {})
+    app_control = raw.get("app_control", {})
 
     return OrchestratorConfig(
         data_pipe=raw["data_pipe"],
@@ -99,5 +113,13 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         ),
         admin_pipe=raw.get("admin_pipe", "\\\\.\\pipe\\dlp_agent_admin"),
         drain_timeout_seconds=service.get("drain_timeout_seconds", 8),
+        app_control_enabled=app_control.get("enabled", True),
+        app_control_inbox_dir=app_control.get("inbox_dir", ""),
+        app_control_rejected_dir=app_control.get("rejected_dir", ""),
+        app_control_staging_dir=app_control.get("staging_dir", ""),
+        app_control_poll_seconds=app_control.get("poll_seconds", 3),
+        app_control_reconcile_interval_seconds=app_control.get("reconcile_interval_seconds", 30),
+        app_control_forward_block_events=app_control.get("forward_block_events", True),
+        app_control_extra_paths=list(app_control.get("extra_paths", []) or []),
         raw=raw,
     )

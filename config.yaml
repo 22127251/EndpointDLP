@@ -146,3 +146,17 @@ peripheral_storage:                  # Controller reads this whole subtree.
   transfer_agent:                    # TransferAgent reads only this nested subtree.
     connect_timeout_ms: 5000         # was hardcoded in OrchestratorClient.cs:24
     analysis_timeout_seconds: 10     # was hardcoded in OrchestratorClient.cs:25
+
+# ── Phase AC-3: App Control (WDAC) channel (orchestrator-internal daemon threads) ──
+# The channel runs inside run_core; it watches an inbox drop-folder for compiled
+# policy pushes, deploys them via citool, and forwards CodeIntegrity block events
+# to events.jsonl. It sits IDLE (no policy) until the first push (decision 7).
+app_control:
+  enabled: true                      # false → channel does not start
+  inbox_dir: ""                      # empty → %PROGRAMDATA%\DLP\appcontrol\inbox
+  rejected_dir: ""                   # empty → %PROGRAMDATA%\DLP\appcontrol\rejected
+  staging_dir: ""                    # empty → %PROGRAMDATA%\DLP\appcontrol\staging
+  poll_seconds: 3                    # inbox poll interval (2–5 s recommended)
+  reconcile_interval_seconds: 30     # how often to re-sync status with live citool state
+  forward_block_events: true         # subscribe to CodeIntegrity/Operational and log our blocks
+  extra_paths: []                    # extra self-protect FilePath roots (AC-4/AC-5 may set)

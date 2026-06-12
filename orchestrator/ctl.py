@@ -116,6 +116,25 @@ def _cmd_status(admin_pipe: str) -> int:
             pid_s = f" pid={pid}" if pid else ""
             print(f"  {name:<22} {state}{pid_s}{sess_s} "
                   f"{' '.join(flags)}".rstrip())
+    # Phase AC-3: App Control (WDAC) channel summary (display-only; the
+    # `appcontrol` authoring subcommands arrive in AC-4).
+    ac = resp.get("app_control")
+    if isinstance(ac, dict):
+        if not ac.get("enabled", False):
+            print("app-control  : disabled")
+        elif not ac.get("running", False):
+            print("app-control  : enabled (not running)")
+        elif not ac.get("policy_guid"):
+            print(f"app-control  : no policy (pending={ac.get('pending_inbox', 0)}, "
+                  f"rejected={ac.get('rejected_count', 0)})"
+                  + (f", last_error={ac['last_error']}" if ac.get("last_error") else ""))
+        else:
+            blocks = ac.get("blocks") or {}
+            print(f"app-control  : policy={ac['policy_guid']} v{ac.get('version_ex')}, "
+                  f"blocks={blocks.get('enforce', 0)}/{blocks.get('audit', 0)} "
+                  f"(enforce/audit), pending={ac.get('pending_inbox', 0)}, "
+                  f"rejected={ac.get('rejected_count', 0)}"
+                  + (f", last_error={ac['last_error']}" if ac.get("last_error") else ""))
     return 0
 
 
