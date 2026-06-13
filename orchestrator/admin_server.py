@@ -42,10 +42,17 @@ class AdminServer:
         config: OrchestratorConfig,
         status_provider: Callable[[], dict],
         reload_callback: Callable[[], dict],
+        commands: dict[str, Callable[[dict], dict]] | None = None,
     ) -> None:
         self._config = config
         self._status_provider = status_provider
         self._reload_callback = reload_callback
+        # Extensible command table (Phase AC-4): each entry maps a cmd name to a
+        # handler taking the parsed request and returning a dict merged into the
+        # {"ok": True, ...} response. status/reload stay special-cased above so the
+        # existing callers/tests are unaffected; new commands (appcontrol_disable,
+        # future server pushes) are one-line dict entries wired in __main__.
+        self._commands = commands or {}
         self._stop = threading.Event()
         # Admins-only: non-admin dlp-ctl callers are denied at CreateFile.
         self._pipe_sa = build_pipe_sa(allow_authenticated_users=False)
@@ -121,6 +128,9 @@ class AdminServer:
                 return {"ok": True, **self._status_provider()}
             if cmd == "reload":
                 return {"ok": True, **self._reload_callback()}
+            handler = self._commands.get(cmd)
+            if handler is not None:
+                return {"ok": True, **handler(request)}
             return {"ok": False, "error": f"unknown cmd: {cmd!r}"}
         except Exception as exc:  # noqa: BLE001 — never crash the admin loop
             log.exception("Admin command %r failed", cmd)

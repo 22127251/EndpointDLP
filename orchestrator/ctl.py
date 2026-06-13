@@ -175,6 +175,159 @@ def _cmd_tail(log_dir: Path, use_agent_log: bool, n: int, follow: bool) -> int:
             return 0
 
 
+# --------------------------------------------------------------------------- #
+# Phase AC-4: App Control (WDAC) authoring subcommands
+# --------------------------------------------------------------------------- #
+
+def _cmd_appcontrol(args, config) -> int:
+    # Lazy import: keep status/reload/tail import-light. builder pulls only the
+    # AC-2/AC-3 app_control modules (no analyzer deps), so this is embed-safe.
+    from orchestrator.app_control import builder, paths
+
+    cmd = args.ac_command
+    if cmd in ("allow", "deny"):
+        return _ac_list(builder, paths, config, cmd, args.paths, args.remove)
+    if cmd == "build":
+        return _ac_build(builder, config, getattr(args, "version", None))
+    if cmd == "apply":
+        return _ac_apply(builder, config)
+    if cmd == "status":
+        return _ac_status(builder, paths, config)
+    if cmd == "disable":
+        return _ac_disable(builder, config, args.force_local)
+    return 2
+
+
+def _ac_list(builder, paths, config, which: str, path_args, remove: bool) -> int:
+    list_path = (paths.allow_list_path(config) if which == "allow"
+                 else paths.deny_list_path(config))
+    try:
+        if remove:
+            removed, remaining = builder.remove_entries(list_path, path_args)
+            print(f"{which}: removed {len(removed)} ({len(remaining)} remain) -> {list_path}")
+            for e in removed:
+                print(f"  - {e}")
+        else:
+            added, all_entries = builder.add_entries(list_path, path_args)
+            print(f"{which}: added {len(added)} ({len(all_entries)} total) -> {list_path}")
+            for e in added:
+                print(f"  + {e}")
+        return 0
+    except OSError as exc:
+        print(f"dlp-ctl: failed to update {which}-list: {exc}", file=sys.stderr)
+        return 1
+
+
+def _ac_build(builder, config, version) -> int:
+    try:
+        result = builder.build(config, version=version)
+    except (RuntimeError, OSError) as exc:  # BuildError, ConfigCI preflight, bad path
+        print(f"dlp-ctl: build failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"built policy {result['policy_id']} v{result['version_ex']} "
+          f"({result['allow_files']} allow, {result['deny_files']} deny, "
+          f"{len(result['hashed'])} hashed)")
+    for f in result["hashed"]:
+        print(f"  ~ hash-fallback (no PE version-info): {f}")
+    for w in result["warnings"]:
+        print(f"  ! {w}")
+    print(f"  staged: {result['staging_dir']}")
+    print("  run `dlp-ctl appcontrol apply` to deploy it.")
+    return 0
+
+
+def _ac_apply(builder, config) -> int:
+    try:
+        result = builder.apply(config)
+    except (RuntimeError, OSError) as exc:
+        print(f"dlp-ctl: apply failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"applied -> {result['applied']}")
+    print("  the agent's inbox watcher will validate + deploy it; "
+          "check `dlp-ctl appcontrol status`.")
+    return 0
+
+
+def _ac_status(builder, paths, config) -> int:
+    # Local (offline) view first — works even when the agent is down.
+    allow_n = len(builder.read_entries(paths.allow_list_path(config)))
+    deny_n = len(builder.read_entries(paths.deny_list_path(config)))
+    staged = paths.staging_dir(config) / "build" / "manifest.json"
+    staged_ver = None
+    if staged.is_file():
+        try:
+            staged_ver = json.loads(staged.read_text(encoding="utf-8")).get("version_ex")
+        except (OSError, ValueError):
+            staged_ver = "?"
+    print(f"lists        : allow={allow_n}, deny={deny_n}")
+    print("staged build : " + (f"v{staged_ver} (run `apply` to deploy)"
+                                if staged_ver else "(none)"))
+    # Live view via the admin-pipe (reuses the existing status command, decision D2).
+    resp = _admin_call(config.admin_pipe, {"cmd": "status"})
+    if resp is None:
+        return 1  # _admin_call already explained why (agent down / access denied)
+    if not resp.get("ok"):
+        print(f"dlp-ctl: {resp.get('error', 'status failed')}", file=sys.stderr)
+        return 1
+    ac = resp.get("app_control")
+    if not isinstance(ac, dict):
+        print("app-control  : (no data)")
+        return 0
+    _print_appcontrol(ac)
+    return 0
+
+
+def _print_appcontrol(ac: dict) -> None:
+    if not ac.get("enabled", False):
+        print("app-control  : disabled")
+        return
+    if not ac.get("running", False):
+        print("app-control  : enabled (channel not running)")
+        return
+    guid = ac.get("policy_guid")
+    if not guid:
+        print(f"app-control  : no policy deployed "
+              f"(pending={ac.get('pending_inbox', 0)}, "
+              f"rejected={ac.get('rejected_count', 0)})")
+    else:
+        blocks = ac.get("blocks") or {}
+        print(f"app-control  : policy={guid} v{ac.get('version_ex')} "
+              f"(deployed {ac.get('deployed_at')})")
+        print(f"  blocks     : {blocks.get('enforce', 0)} enforce / "
+              f"{blocks.get('audit', 0)} audit"
+              + (f"  last={ac['last_block_at']}" if ac.get("last_block_at") else ""))
+        print(f"  inbox      : pending={ac.get('pending_inbox', 0)}, "
+              f"rejected={ac.get('rejected_count', 0)}")
+    print(f"  forwarder  : {'on' if ac.get('forwarder') else 'off'}")
+    if ac.get("last_error"):
+        print(f"  last_error : {ac['last_error']}")
+
+
+def _ac_disable(builder, config, force_local: bool) -> int:
+    if force_local:
+        try:
+            result = builder.disable_local(config)
+        except (RuntimeError, OSError) as exc:
+            print(f"dlp-ctl: force-local disable failed: {exc}", file=sys.stderr)
+            return 1
+    else:
+        resp = _admin_call(config.admin_pipe, {"cmd": "appcontrol_disable"})
+        if resp is None:
+            print("  the agent may be down — retry with `--force-local`.", file=sys.stderr)
+            return 1
+        if not resp.get("ok"):
+            print(f"dlp-ctl: {resp.get('error', 'disable failed')}", file=sys.stderr)
+            return 1
+        result = resp
+    if result.get("removed"):
+        print("app-control: policy removed.")
+        return 0
+    err = result.get("last_error") or result.get("error")
+    print("dlp-ctl: disable did not remove the policy"
+          + (f": {err}" if err else "."), file=sys.stderr)
+    return 1
+
+
 def _resolve_log_dir(config) -> Path:
     if config.log_dir:
         return Path(config.log_dir)
@@ -199,6 +352,31 @@ def main(argv: list[str] | None = None) -> int:
                         help="Tail dlp-agent.log instead of events.jsonl.")
     p_tail.add_argument("-n", type=int, default=50, help="Lines to show (default 50).")
     p_tail.add_argument("--follow", action="store_true", help="Stream new lines.")
+
+    # Phase AC-4: App Control (WDAC) authoring. allow/deny/build/apply are offline
+    # local-file ops (run elevated); status/disable talk to the agent's admin-pipe
+    # (disable has a --force-local escape hatch for when the agent is dead).
+    p_ac = sub.add_parser("appcontrol", parents=[common],
+                          help="App Control (WDAC): allow/deny/build/apply/status/disable.")
+    ac_sub = p_ac.add_subparsers(dest="ac_command", required=True)
+    for verb in ("allow", "deny"):
+        p = ac_sub.add_parser(verb, parents=[common],
+                              help=f"Add (or --remove) {verb.capitalize()} targets (files/folders).")
+        p.add_argument("paths", nargs="+", help="File and/or folder paths.")
+        p.add_argument("--remove", action="store_true",
+                       help="Remove the given paths from the list instead of adding.")
+    p_build = ac_sub.add_parser("build", parents=[common],
+                                help="Build + compile a policy from the lists into staging.")
+    p_build.add_argument("--version", help="Override the auto-bumped VersionEx (4 dotted ints).")
+    ac_sub.add_parser("apply", parents=[common],
+                      help="Move the staged build into the inbox (deploy it).")
+    ac_sub.add_parser("status", parents=[common],
+                      help="Show the App Control channel + local staging/list status.")
+    p_disable = ac_sub.add_parser("disable", parents=[common],
+                                  help="Remove the deployed policy.")
+    p_disable.add_argument("--force-local", action="store_true",
+                           help="Drive citool directly (no running agent needed) — escape hatch.")
+
     args = parser.parse_args(argv)
 
     config = load_config(getattr(args, "config", None))
@@ -209,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reload(config.admin_pipe)
     if args.command == "tail":
         return _cmd_tail(_resolve_log_dir(config), args.log, args.n, args.follow)
+    if args.command == "appcontrol":
+        return _cmd_appcontrol(args, config)
     parser.error("no command")
     return 2
 

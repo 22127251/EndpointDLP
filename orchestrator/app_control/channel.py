@@ -10,12 +10,10 @@ channel is self-sufficient before the AC-5 installer step exists.
 from __future__ import annotations
 
 import logging
-import os
 import threading
-from pathlib import Path
 
+from . import paths
 from . import policy_xml as px
-from . import selfprotect
 from .deployer import Deployer
 from .event_forwarder import EventForwarder
 from .inbox import InboxWatcher
@@ -23,29 +21,19 @@ from .inbox import InboxWatcher
 log = logging.getLogger("orchestrator.app_control.channel")
 
 
-def _program_data() -> Path:
-    return Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
-
-
-def _program_files() -> str:
-    return os.environ.get("ProgramFiles", r"C:\Program Files")
-
-
 class AppControlChannel:
     def __init__(self, config) -> None:
         self._config = config
-        ac_root = _program_data() / "DLP" / "appcontrol"
-        self._inbox_dir = Path(config.app_control_inbox_dir or (ac_root / "inbox"))
-        self._rejected_dir = Path(config.app_control_rejected_dir or (ac_root / "rejected"))
-        self._staging_dir = Path(config.app_control_staging_dir or (ac_root / "staging"))
-
-        inst = config.raw.get("install") or {}
-        state_dir = Path(inst.get("state_dir") or (_program_data() / "DLP" / "state"))
-        self._status_path = state_dir / "appcontrol_status.json"
-
-        self._install_root = inst.get("install_root") or f"{_program_files()}\\DLP"
-        self._dotnet_root = selfprotect.default_dotnet_root()
-        self._extra_paths = list(config.app_control_extra_paths or []) or None
+        # Dirs/status/roots resolve via paths.py — the single source of truth the
+        # AC-4 builder shares, so `dlp-ctl appcontrol apply` writes the inbox this
+        # watcher reads.
+        self._inbox_dir = paths.inbox_dir(config)
+        self._rejected_dir = paths.rejected_dir(config)
+        self._staging_dir = paths.staging_dir(config)
+        self._status_path = paths.status_path(config)
+        self._install_root = paths.install_root(config)
+        self._dotnet_root = paths.dotnet_root(config)
+        self._extra_paths = paths.extra_paths(config)
 
         self._poll_seconds = config.app_control_poll_seconds
         self._reconcile_interval = config.app_control_reconcile_interval_seconds
@@ -131,6 +119,21 @@ class AppControlChannel:
             "rejected_count": self._watcher.rejected_count if self._watcher else 0,
             "inbox_dir": str(self._inbox_dir),
         }
+
+    # -- emergency disable (admin-pipe `appcontrol_disable`) ----------------
+
+    def disable(self) -> dict:
+        """Remove our deployed policy via the deployer (``citool --remove-policy``
+        + neutralizer fallback). Returns ``{"removed": bool, ...status}``. Driven by
+        AC-4's ``dlp-ctl appcontrol disable`` over the admin-pipe; never raises."""
+        if self._deployer is None:
+            return {"removed": False, "error": "deployer not started"}
+        try:
+            removed = self._deployer.remove()
+        except Exception as exc:  # noqa: BLE001 — must not crash the admin loop
+            log.exception("app_control disable failed")
+            return {"removed": False, "error": str(exc)}
+        return {"removed": removed, **self.status()}
 
     # -- hot-reload (bounded; dir changes need a restart, like data_pipe) ---
 

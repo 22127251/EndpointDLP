@@ -228,6 +228,27 @@ dlp-ctl tail --log -n 80       # last 80 lines of dlp-agent.log
 
 > ✅ **PRE-TESTED (CLI logic)** — `tail` and the "agent not running"/"missing pywin32" guidance paths were verified via `python -m orchestrator.ctl …`; the installed `dlp-ctl` PATH wrapper + the live elevated `status`/`reload` round-trip are install/VM-verified.
 
+#### App Control (WDAC) — `dlp-ctl appcontrol` (Phase AC-4)
+
+The standalone operator loop for the App Control channel. `allow`/`deny`/`build`/`apply` are **offline** local-file operations (run elevated); `status`/`disable` talk to the running agent. The agent's inbox watcher deploys whatever `apply` drops — no hand-built pushes, no central server.
+
+```powershell
+dlp-ctl appcontrol allow "C:\Program Files\7-Zip"      # add Allow targets (files/folders)
+dlp-ctl appcontrol deny  "C:\…\OneDrive.exe"            # add Deny targets
+dlp-ctl appcontrol allow "C:\…\old" --remove           # drop entries from a list
+dlp-ctl appcontrol build                               # compile lists -> staging\build\ (auto-bumps VersionEx)
+dlp-ctl appcontrol apply                               # move the staged push into the inbox (go live)
+dlp-ctl appcontrol status                              # lists + staged build + deployed policy/blocks
+dlp-ctl appcontrol disable                             # remove the deployed policy (via the agent)
+dlp-ctl appcontrol disable --force-local               # emergency removal driving citool directly (agent-down escape)
+```
+
+- Lists live at `C:\ProgramData\DLP\appcontrol\{allow,deny}-list.txt`; folders are re-scanned for executables at every `build`. Each target gets a WDAC rule on its **InternalName**; a file with no usable PE version-info falls back to a **Hash** rule automatically. Self-protect rules (`<install_root>\*` + `C:\Program Files\dotnet\*`) are always merged so the agent stays runnable under its own policy.
+- `build` compiles with `ConvertFrom-CIPolicy`, so the endpoint needs the **ConfigCI** module. The AC-5 installer step (`enable_configci`) will DISM-enable it automatically; until then enable it once on a clean machine with:
+  `Get-ChildItem $Env:SystemRoot\servicing\Packages\*ConfigCI*.mum | % { dism /online /norestart /add-package:"$($_.FullName)" }`
+
+> ✅ **PRE-TESTED (dev, side-effect-free)** — list management, a real `ConvertFrom-CIPolicy` build + `apply` to a temp inbox, and the offline `status` degradation were verified via `python -m orchestrator.ctl appcontrol …`; the live deploy/block/disable round-trip on the installed service is VM-verified.
+
 **Where to change the INPUT (what gets blocked):** edit the **installed** policy file, then reload —
 
 - Installed policies: `C:\Program Files\DLP\analyzer\policies.yaml`

@@ -281,7 +281,16 @@ def run_core(
             result["errors"] = errors
         return result
 
-    admin_server = AdminServer(config, _status_provider, _reload_callback)
+    def _appcontrol_disable(request: dict) -> dict:
+        # Phase AC-4: `dlp-ctl appcontrol disable` over the admin-pipe. Reads the
+        # later-assigned app_control_channel at call time (like _status_provider).
+        if app_control_channel is None:
+            return {"removed": False, "error": "app control channel not running"}
+        return app_control_channel.disable()
+
+    admin_server = AdminServer(
+        config, _status_provider, _reload_callback,
+        commands={"appcontrol_disable": _appcontrol_disable})
     admin_thread = threading.Thread(
         target=admin_server.run, daemon=True, name="admin-server")
     admin_thread.start()
