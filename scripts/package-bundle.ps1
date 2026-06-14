@@ -127,16 +127,19 @@ Set-Content -Path (Join-Path $BundleDir "install.cmd") -Value $InstallCmd -Encod
 $UninstallCmd = @'
 @echo off
 REM DLP Agent uninstaller. Run as administrator.
-REM Prefer the BUNDLE's python (it lives OUTSIDE %ProgramFiles%\DLP), so the
-REM uninstaller never locks the very tree it is removing. Running the *installed*
-REM python would lock %ProgramFiles%\DLP\python\* and force a reboot to finish.
-REM Fall back to the installed python only if the bundle's embed is missing.
+REM Prefer the INSTALLED python: it is covered by the App Control self-protect
+REM policy (C:\Program Files\DLP\*), so it launches even while an enforcement
+REM policy is deployed. The bundle's embed python is NOT covered and WDAC would
+REM block it under enforcement. Fall back to the bundle python only when the agent
+REM isn't installed (in which case no self-protect policy is enforcing).
+REM (The installed tree also ships its own uninstall.cmd at %ProgramFiles%\DLP,
+REM usable when this bundle is gone.)
 setlocal
 set "PF=%ProgramFiles%\DLP"
-if exist "%~dp0python-embed\python.exe" (
-  "%~dp0python-embed\python.exe" -m orchestrator --uninstall --config "%~dp0config.yaml"
-) else (
+if exist "%PF%\python\python.exe" (
   "%PF%\python\python.exe" -m orchestrator --uninstall --config "%PF%\config.yaml"
+) else (
+  "%~dp0python-embed\python.exe" -m orchestrator --uninstall --config "%~dp0config.yaml"
 )
 echo.
 pause
@@ -202,8 +205,23 @@ ADMIN CLI:
   status / reload require an elevated prompt; per-decision audit log:
     %ProgramData%\DLP\logs\events.jsonl
 
+APP CONTROL (WDAC):
+  The agent includes an App Control channel. Install auto-enables the ConfigCI
+  module (so on-endpoint policy building works) and creates the drop-folder tree
+  under %ProgramData%\DLP\appcontrol; no policy is deployed until you push one.
+  Author/build/apply policies with `dlp-ctl appcontrol allow|deny|build|apply`.
+  Set app_control.enabled: false in config.yaml to skip the channel entirely.
+
 To uninstall (elevated):
   Run uninstall.cmd as administrator (reverses everything; safe to re-run).
+  It also removes any deployed App Control policy (no reboot) and the whole
+  %ProgramData%\DLP\appcontrol tree.
+  The installer also drops %ProgramFiles%\DLP\uninstall.cmd, so you can uninstall
+  even after deleting this bundle. Both uninstallers run from the INSTALLED python,
+  which the App Control self-protect policy allows, so uninstall works even while a
+  policy is enforced.
+  To RE-INSTALL over a still-enforced policy, first disable it: dlp-ctl appcontrol
+  disable (then run install.cmd).
 
 After install you may delete this bundle folder to reclaim disk space.
 '@
