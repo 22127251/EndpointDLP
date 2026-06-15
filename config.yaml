@@ -146,3 +146,12 @@ peripheral_storage:                  # Controller reads this whole subtree.
   transfer_agent:                    # TransferAgent reads only this nested subtree.
     connect_timeout_ms: 5000         # was hardcoded in OrchestratorClient.cs:24
     analysis_timeout_seconds: 10     # was hardcoded in OrchestratorClient.cs:25
+
+# ── Management Server sync (pulled/pushed by ServerSync thread) ──────────
+server:
+  enabled: false                       # set true to activate agent↔server sync
+  url: ""                              # e.g. http://192.168.1.100:8000
+  agent_key: ""                        # shared secret (matches server's AGENT_SECRET_KEY)
+  agent_id: ""                         # filled automatically after first register
+  sync_interval_seconds: 60            # heartbeat + config/policy pull cadence
+  log_push_interval_seconds: 60        # how often to push events.jsonl / dlp-agent.log

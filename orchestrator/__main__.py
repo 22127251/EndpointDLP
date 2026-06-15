@@ -119,6 +119,7 @@ def run_core(
     from orchestrator.dispatcher import Dispatcher
     from orchestrator.policy_manager import PolicyManager
     from orchestrator.server import PipeServer
+    from orchestrator.server_sync import ServerSync
     from orchestrator.supervisor import Supervisor, build_default_specs
 
     log = logging.getLogger("orchestrator")
@@ -240,6 +241,10 @@ def run_core(
             "last_config_reload": _iso(config_state["reloaded_wall"]),
             "last_policy_reload": _iso(pm.last_reload_time()),
             "children": supervisor.status_snapshot() if supervisor is not None else {},
+            "server_sync": {
+                "enabled": server_sync.enabled,
+                "agent_id": server_sync.agent_id or "(not registered)",
+            },
         }
 
     def _reload_callback() -> dict:
@@ -273,6 +278,10 @@ def run_core(
         target=admin_server.run, daemon=True, name="admin-server")
     admin_thread.start()
 
+    # ── Phase G: management server sync (register / heartbeat / pull / push) ──
+    server_sync = ServerSync(config)
+    server_sync.start()
+
     try:
         # Block until SvcStop sets stop_event, the pipe server dies, or (foreground)
         # Ctrl+C raises KeyboardInterrupt. The 0.5 s tick lets KeyboardInterrupt fire.
@@ -290,6 +299,7 @@ def run_core(
         server.stop()
         ctl_server.stop()
         admin_server.stop()
+        server_sync.stop()
         t.join(timeout=5.0)
         ctl_thread.join(timeout=5.0)
         admin_thread.join(timeout=5.0)

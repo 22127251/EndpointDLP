@@ -1,7 +1,8 @@
+import hashlib
 import yaml
 from uuid import UUID
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -14,8 +15,40 @@ from app.api.deps import get_current_user, verify_agent_token
 from app.services.policy_service import get_combined_policies_for_agent
 from fastapi.encoders import jsonable_encoder
 from app.services.audit_log_service import add_audit_log
+import os
+from pathlib import Path
 
 router = APIRouter(prefix="/agents", tags=["Agents"])
+
+
+def _compute_policies_hash(policies: list) -> str:
+    """Compute a stable hash of the agent's policy set for change detection."""
+    import json
+    policy_dicts = []
+    for p in policies:
+        pd = {
+            "id": str(p.id),
+            "name": p.name,
+            "rule_type": p.rule_type,
+            "rule": p.rule,
+            "action": p.action,
+            "channel": p.channel,
+            "is_active": p.is_active,
+        }
+        policy_dicts.append(pd)
+    canonical = json.dumps(policy_dicts, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _compute_config_hash(agent_id: str) -> str:
+    """Compute a hash of the agent's current config for change detection."""
+    import json
+    config_data = {
+        "agent_id": agent_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    canonical = json.dumps(config_data, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 @router.get("/", response_model=dict)
@@ -190,10 +223,12 @@ async def register_agent(
     return AgentResponse.model_validate(agent)
 
 
-@router.patch("/{agent_id}/heartbeat", response_model=AgentResponse)
+@router.patch("/{agent_id}/heartbeat")
 async def agent_heartbeat(
     agent_id: UUID,
     format: str = Query("json", enum=["json", "yaml"]),
+    policies_hash: str | None = Query(None, description="Agent's local policies.yaml hash"),
+    config_hash: str | None = Query(None, description="Agent's local config.yaml hash"),
     db: AsyncSession = Depends(get_db),
     agent_key: str = Depends(verify_agent_token)
 ):
@@ -213,6 +248,10 @@ async def agent_heartbeat(
 
     await db.commit()
 
+    # Compute server-side hashes for change detection
+    server_policies_hash = _compute_policies_hash(agent.policies)
+    server_config_hash = _compute_config_hash(str(agent_id))
+
     agent_data = AgentResponse.model_validate(agent)
     if format == "yaml":
         clean_data = jsonable_encoder(agent_data)
@@ -231,7 +270,76 @@ async def agent_heartbeat(
             }
         )
     
-    return agent_data
+    return {
+        **jsonable_encoder(agent_data),
+        "policies_hash": server_policies_hash,
+        "config_hash": server_config_hash,
+    }
+
+
+@router.post("/{agent_id}/logs")
+async def upload_agent_logs(
+    agent_id: UUID,
+    events_file: UploadFile | None = File(None, description="events.jsonl file"),
+    agent_log_file: UploadFile | None = File(None, description="dlp-agent.log file"),
+    db: AsyncSession = Depends(get_db),
+    agent_key: str = Depends(verify_agent_token)
+):
+    agent = await db.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    log_dir = Path(os.getenv("AGENT_LOG_STORAGE", "logs/agents")) / str(agent_id)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    uploaded = []
+    if events_file:
+        events_path = log_dir / "events.jsonl"
+        content = await events_file.read()
+        events_path.write_bytes(content)
+        uploaded.append("events.jsonl")
+
+    if agent_log_file:
+        agent_log_path = log_dir / "dlp-agent.log"
+        content = await agent_log_file.read()
+        agent_log_path.write_bytes(content)
+        uploaded.append("dlp-agent.log")
+
+    await add_audit_log(
+        db=db,
+        user_id="agent",
+        username=f"agent_{agent.id}",
+        action="upload_logs",
+        target_type="agent",
+        target_id=str(agent.id),
+        description=f"Agent {agent.id} uploaded logs: {', '.join(uploaded)}"
+    )
+    await db.commit()
+
+    return {"status": "ok", "uploaded": uploaded}
+
+
+@router.get("/{agent_id}/status")
+async def get_agent_status(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    agent = await db.get(Agent, agent_id)
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    now = datetime.now(timezone.utc)
+    is_online = (now - agent.last_seen).total_seconds() < 300 if agent.last_seen else False
+
+    return {
+        "agent_id": str(agent.id),
+        "hostname": agent.hostname,
+        "status": agent.status.value,
+        "is_online": is_online,
+        "last_seen": agent.last_seen.isoformat() if agent.last_seen else None,
+        "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
+    }
 
 
 @router.patch("/{agent_id}")
