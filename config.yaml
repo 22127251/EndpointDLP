@@ -18,12 +18,10 @@ pools:
 limits:
   max_clipboard_bytes: 1048576       # 1 MB
   max_file_bytes:      104857600     # 100 MB (browser)
-  # Verdict when input exceeds the cap, per channel. "block" = fail-closed
-  # (default), "allow" = fail-open. The reason is logged as reason=size_limit.
-  oversize_fail_behavior:
-    clipboard:          block
-    browser:            block
-    peripheral_storage: block
+  # The per-channel verdict on an oversize input is now folded into the unified
+  # `failure_mode` knob on each channel's own section (clipboard / browser /
+  # peripheral_storage.transfer_agent below) — one setting covers oversize,
+  # timeout, and analysis-error. The reason is still logged as reason=size_limit.
 
 supervisor:                          # Consumed in Phase C; harmless to keep now.
   max_restarts: 3
@@ -71,10 +69,18 @@ install:
 
 clipboard:
   pipe_timeout_ms: 12000             # client wait > orchestrator analysis (10 s)
+  # Orchestrator-side verdict on ANY analysis failure for this channel
+  # (timeout / oversize / analysis-error): fail_closed → BLOCK (default),
+  # fail_open → ALLOW. (Phase 7 also makes the client's pipe-fail path honor this.)
+  failure_mode: fail_closed
 
 browser:                             # All fields migrated from interceptors/browser/config.yaml.
   pipe_timeout_seconds: 12           # client wait > orchestrator analysis (10 s)
-  fail_behavior: "open"             # "allow" | "block" on pipe error
+  fail_behavior: "open"             # "allow" | "block" on CLIENT pipe error (retired in Phase 7)
+  # Orchestrator-side verdict on ANY analysis failure for this channel
+  # (timeout / oversize / analysis-error): fail_closed → BLOCK (default),
+  # fail_open → ALLOW.
+  failure_mode: fail_closed
   temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp"   # empty → system %TEMP%
   min_upload_size_bytes: 1024
 
@@ -155,6 +161,10 @@ peripheral_storage:                  # Controller reads this whole subtree.
   transfer_agent:                    # TransferAgent reads only this nested subtree.
     connect_timeout_ms: 5000         # was hardcoded in OrchestratorClient.cs:24
     analysis_timeout_seconds: 12     # client wait > orchestrator analysis (10 s)
+    # Orchestrator-side verdict for peripheral-channel analysis failures
+    # (timeout / oversize / analysis-error): fail_closed → BLOCK (default),
+    # fail_open → ALLOW. (Phase 7 wires the C# client's pipe-fail path to this.)
+    failure_mode: fail_closed
 
 # ── Phase AC-3: App Control (WDAC) channel (orchestrator-internal daemon threads) ──
 # The channel runs inside run_core; it watches an inbox drop-folder for compiled

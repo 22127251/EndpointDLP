@@ -95,7 +95,17 @@ independently verifiable:
 `TabularData.body` + `analyze_tabular` proximity-merge + tests (`analyzer-body-context-fix-plan.md`).
 This is what introduced the normalize-on-body cost that Phase 2 makes cheap. No further action.
 
-## Phase 1 — Orchestrator-side unified `failure_mode` — `config.yaml`, `orchestrator/config.py`, `orchestrator/policy_manager.py`, `orchestrator/dispatcher.py`
+## Phase 1 — Orchestrator-side unified `failure_mode` — ✅ DONE
+`config.yaml` (deleted `limits.oversize_fail_behavior`; added `failure_mode: fail_closed` to
+`clipboard`/`browser` + `peripheral_storage.transfer_agent`), `config.py` (`failure_mode` dict +
+`verdict_for(channel)` helper), `policy_manager._oversize_verdict` + `dispatcher` timeout/error paths
+now call `verdict_for(channel)` (no hardcoded BLOCK; `reason=` still logged, `failing closed|open`).
+Verified: new `scripts/harness/test_failure_mode.py` (oversize/error/timeout × fail_closed/fail_open ×
+3 channels) + `conftest.py config_overrides` deep-merge param; `pytest scripts/harness/ -q` =
+**137 passed, 3 skipped**. Client-read config polish (pipe→ms, peripheral subtree reorg, retiring
+`browser.fail_behavior`/`peripheral_storage.fail_mode`) is still deferred to Phase 7.
+
+## Phase 1 (original detail, retained) — `config.yaml`, `orchestrator/config.py`, `orchestrator/policy_manager.py`, `orchestrator/dispatcher.py`
 **Goal (do first — trivial, makes config cleaner):** ONE per-channel setting decides BLOCK/ALLOW for
 every *orchestrator-side* failure (timeout, file-size, text-cap, analysis-error). No client-read keys
 touched (see sequencing note).

@@ -1,9 +1,12 @@
-"""Gap 3: dispatcher fail-closed timeout.
+"""Gap 3: dispatcher timeout path under the default (fail_closed) failure_mode.
 
 When analysis exceeds the orchestrator's `_ANALYSIS_TIMEOUT` (4 s), the
-dispatcher must return BLOCK with "Analysis timed out" reason. We force the
-slow path via the DLP_TEST_SLOW_MS env var (5 s sleep) so the test is
-deterministic instead of dependent on extract_text timing.
+dispatcher returns the channel's failure_mode verdict. With the default
+fail_closed that is BLOCK + "Analysis timed out" reason, which these tests pin
+(including the user-facing reason string). The fail_open counterpart — and the
+oversize/error failure paths — live in test_failure_mode.py. We force the slow
+path via the DLP_TEST_SLOW_MS env var (5 s sleep) so the test is deterministic
+instead of dependent on extract_text timing.
 """
 from __future__ import annotations
 

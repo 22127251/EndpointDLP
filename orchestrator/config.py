@@ -46,9 +46,13 @@ class OrchestratorConfig:
     # Sourced from service.analysis_timeout_seconds; client pipe timeouts must
     # exceed this. Default 4.0 keeps the harness (no `service` section) unchanged.
     analysis_timeout_seconds: float = 4.0
-    # Per-channel verdict when input exceeds the size cap ("block" = fail-closed,
-    # the default; "allow" = fail-open). Sourced from limits.oversize_fail_behavior.
-    oversize_fail_behavior: dict = field(default_factory=dict)
+    # Unified per-channel verdict for ANY orchestrator-side analysis failure
+    # (oversize input, analysis timeout, analysis error — and the extracted-text
+    # cap added in Phase 5): "fail_closed" → BLOCK (default), "fail_open" → ALLOW.
+    # Sourced from <channel>.failure_mode; peripheral_storage reads the nested
+    # transfer_agent.failure_mode (the component that owns the verdict). Use
+    # verdict_for() rather than reading this dict directly.
+    failure_mode: dict = field(default_factory=dict)
     # Phase AC-3 additions — the App Control (WDAC) channel. Sourced from the
     # app_control: section in config.yaml. Defaulted so pre-AC-3 fixtures that
     # build the dataclass directly (test_supervisor.py:_minimal_config) don't need
@@ -68,6 +72,13 @@ class OrchestratorConfig:
     # over the ctl-pipe without re-parsing the file on every change.
     raw: dict = field(default_factory=dict)
 
+    def verdict_for(self, channel: str) -> str:
+        """Verdict ("BLOCK" | "ALLOW") for any orchestrator-side analysis failure
+        on *channel* — the single point that maps `failure_mode` to a decision.
+        fail_closed → BLOCK (the default when unset/unknown); fail_open → ALLOW."""
+        mode = (self.failure_mode or {}).get(channel, "fail_closed")
+        return "ALLOW" if mode == "fail_open" else "BLOCK"
+
 
 def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     if path is None:
@@ -82,6 +93,19 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     proxy = raw.get("proxy", {})
     service = raw.get("service", {})
     app_control = raw.get("app_control", {})
+
+    # Unified per-channel failure_mode. Each channel reads it from its own section;
+    # peripheral_storage's lives on the transfer_agent subtree (that component owns
+    # the verdict the orchestrator uses for peripheral analysis failures).
+    clipboard_cfg = raw.get("clipboard", {}) or {}
+    browser_cfg = raw.get("browser", {}) or {}
+    peripheral_cfg = raw.get("peripheral_storage", {}) or {}
+    transfer_agent_cfg = peripheral_cfg.get("transfer_agent", {}) or {}
+    failure_mode = {
+        "clipboard": clipboard_cfg.get("failure_mode", "fail_closed"),
+        "browser": browser_cfg.get("failure_mode", "fail_closed"),
+        "peripheral_storage": transfer_agent_cfg.get("failure_mode", "fail_closed"),
+    }
 
     return OrchestratorConfig(
         data_pipe=raw["data_pipe"],
@@ -121,7 +145,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         admin_pipe=raw.get("admin_pipe", "\\\\.\\pipe\\dlp_agent_admin"),
         drain_timeout_seconds=service.get("drain_timeout_seconds", 8),
         analysis_timeout_seconds=float(service.get("analysis_timeout_seconds", 4.0)),
-        oversize_fail_behavior=dict(limits.get("oversize_fail_behavior", {}) or {}),
+        failure_mode=failure_mode,
         app_control_enabled=app_control.get("enabled", True),
         app_control_inbox_dir=app_control.get("inbox_dir", ""),
         app_control_rejected_dir=app_control.get("rejected_dir", ""),

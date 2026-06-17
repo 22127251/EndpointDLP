@@ -39,6 +39,16 @@ def _load_fixture_policy(name: str) -> str:
     return (_FIXTURE_POLICIES_DIR / name).read_text(encoding="utf-8")
 
 
+def _deep_merge(base: dict, overrides: dict) -> None:
+    """Recursively merge *overrides* into *base* in place (nested dicts merged,
+    other values replaced)."""
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
 @dataclass
 class Orchestrator:
     pipe_name: str
@@ -105,6 +115,7 @@ def make_orchestrator():
         policies_fixture: Optional[str] = None,
         pool_overrides: Optional[dict] = None,
         extra_env: Optional[dict] = None,
+        config_overrides: Optional[dict] = None,
         ready_timeout_s: float = 10.0,
     ) -> Orchestrator:
         if policies_yaml is None and policies_fixture is None:
@@ -176,6 +187,12 @@ def make_orchestrator():
                 },
             },
         }
+        # config_overrides deep-merges into the generated config so a test can set
+        # nested keys (e.g. {"clipboard": {"failure_mode": "fail_open"}} or
+        # {"limits": {"max_clipboard_bytes": 4}}) without restating the whole tree.
+        if config_overrides:
+            _deep_merge(config, config_overrides)
+
         config_path = tmp_dir / "config.yaml"
         config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 

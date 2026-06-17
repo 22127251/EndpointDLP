@@ -25,6 +25,7 @@ _CHANNELS = ("clipboard", "browser", "peripheral_storage")
 
 class Dispatcher:
     def __init__(self, cfg: OrchestratorConfig, policy_manager: PolicyManager) -> None:
+        self._cfg = cfg
         self._pm = policy_manager
         self._analysis_timeout = getattr(cfg, "analysis_timeout_seconds", _ANALYSIS_TIMEOUT)
         self._clipboard_pool = ThreadPoolExecutor(
@@ -168,13 +169,16 @@ class Dispatcher:
             reason = _format_block_reason(violations) if decision == "BLOCK" else ""
             return decision, reason, violations
         except FutureTimeoutError:
-            log.error("reason=timeout req=%s channel=browser after %.1fs; failing closed",
-                      req_id, self._analysis_timeout)
+            verdict = self._cfg.verdict_for("browser")
+            log.error("reason=timeout req=%s channel=browser after %.1fs; failing %s",
+                      req_id, self._analysis_timeout, _fail_word(verdict))
             future.cancel()
-            return "BLOCK", "Analysis timed out", []
+            return verdict, ("Analysis timed out" if verdict == "BLOCK" else ""), []
         except Exception as exc:
-            log.error("error req=%s channel=browser: %s", req_id, exc)
-            return "BLOCK", "Analysis error", []
+            verdict = self._cfg.verdict_for("browser")
+            log.error("reason=error req=%s channel=browser: %s; failing %s",
+                      req_id, exc, _fail_word(verdict))
+            return verdict, ("Analysis error" if verdict == "BLOCK" else ""), []
 
     def _analyze_peripheral(self, request: dict) -> tuple[str, list]:
         req_id = request.get("req_id", "?")
@@ -190,13 +194,16 @@ class Dispatcher:
             decision, violations = future.result(timeout=self._analysis_timeout)
             return decision, violations
         except FutureTimeoutError:
-            log.error("reason=timeout req=%s channel=peripheral_storage after %.1fs; failing closed",
-                      req_id, self._analysis_timeout)
+            verdict = self._cfg.verdict_for("peripheral_storage")
+            log.error("reason=timeout req=%s channel=peripheral_storage after %.1fs; failing %s",
+                      req_id, self._analysis_timeout, _fail_word(verdict))
             future.cancel()
-            return "BLOCK", []
+            return verdict, []
         except Exception as exc:
-            log.error("error req=%s channel=peripheral_storage: %s", req_id, exc)
-            return "BLOCK", []
+            verdict = self._cfg.verdict_for("peripheral_storage")
+            log.error("reason=error req=%s channel=peripheral_storage: %s; failing %s",
+                      req_id, exc, _fail_word(verdict))
+            return verdict, []
 
     def _analyze_clipboard(self, request: dict) -> tuple[str, bool, list]:
         req_id = request.get("req_id", "?")
@@ -222,12 +229,14 @@ class Dispatcher:
             try:
                 decision, violations = future.result(timeout=self._analysis_timeout)
             except FutureTimeoutError:
-                log.error("reason=timeout req=%s clip_seq=%d; failing closed", req_id, seq)
+                decision = self._cfg.verdict_for("clipboard")
+                log.error("reason=timeout req=%s clip_seq=%d; failing %s",
+                          req_id, seq, _fail_word(decision))
                 future.cancel()
-                decision = "BLOCK"
             except Exception as exc:
-                log.error("error req=%s clip_seq=%d: %s", req_id, seq, exc)
-                decision = "BLOCK"
+                decision = self._cfg.verdict_for("clipboard")
+                log.error("reason=error req=%s clip_seq=%d: %s; failing %s",
+                          req_id, seq, exc, _fail_word(decision))
         finally:
             with self._clip_lock:
                 self._clip_inflight.pop(seq, None)
@@ -238,6 +247,12 @@ class Dispatcher:
             return decision, False, violations
 
         return decision, True, violations
+
+
+def _fail_word(verdict: str) -> str:
+    """Log token for the failure_mode that produced *verdict* (BLOCK→closed,
+    ALLOW→open), so failure logs read 'failing closed' / 'failing open'."""
+    return "closed" if verdict == "BLOCK" else "open"
 
 
 def _format_block_reason(violations: list) -> str:

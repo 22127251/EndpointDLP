@@ -114,10 +114,10 @@ class PolicyManager:
         self._observer.join()
 
     def _oversize_verdict(self, channel: str, req_id: str, detail: str) -> tuple[str, list]:
-        """Verdict for input over the size cap. Per-channel fail behavior
-        (default 'block' = fail-closed); the reason is recorded in the log."""
-        behavior = (getattr(self._cfg, "oversize_fail_behavior", None) or {}).get(channel, "block")
-        decision = "ALLOW" if behavior == "allow" else "BLOCK"
+        """Verdict for input over the size cap. Follows the channel's unified
+        failure_mode (fail_closed → BLOCK default, fail_open → ALLOW); the reason
+        is recorded in the log."""
+        decision = self._cfg.verdict_for(channel)
         log.warning("reason=size_limit req=%s channel=%s %s -> %s", req_id, channel, detail, decision)
         return decision, []
 
