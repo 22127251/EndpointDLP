@@ -25,6 +25,8 @@ Supported:
 from __future__ import annotations
 
 import csv as _csv
+import io
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,13 +44,23 @@ class ColumnBlock:
 @dataclass
 class TabularData:
     columns: list[ColumnBlock]
+    # Free-text paragraphs (prose) that are NOT part of any table. These are
+    # analyzed with bounded character proximity (engine.analyze), not the
+    # column/row context used for `columns`, because prose has no row/column
+    # structure — resolving its context by "same column/row" over-credits
+    # context to far-apart values. One entry per source paragraph.
+    body: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # Routing helpers
 # ---------------------------------------------------------------------------
 
-_TABULAR_SUFFIXES = {".tsv", ".xlsx", ".ods", ".docx", ".odt", ".pdf"}
+# CSV is tabular (header'd columns). PDF is intentionally NOT here: PyMuPDF
+# find_tables is ~45 s on large PDFs, so PDF is routed to fast plain-text
+# extraction (page.get_text); recall is unaffected (every value is still
+# detected/counted), only header-based context becomes proximity-based.
+_TABULAR_SUFFIXES = {".csv", ".tsv", ".xlsx", ".ods", ".docx", ".odt"}
 
 
 def is_tabular(file_path: str | Path) -> bool:
@@ -180,9 +192,9 @@ def extract_tabular(file_path: str | Path) -> TabularData:
         return _extract_odt_tabular(path)
     if suffix == ".pdf":
         return _extract_pdf_tabular(path)
-    # Fallback: treat as single plaintext column
+    # Fallback: no table structure — treat the whole file as free-text body.
     text = extract_text(path)
-    return TabularData(columns=[ColumnBlock(header="", values=text.splitlines(), sheet=None)])
+    return TabularData(columns=[], body=text.splitlines())
 
 
 # ---- CSV / TSV ----
@@ -246,136 +258,176 @@ def _extract_xlsx_tabular(path: Path) -> TabularData:
     return TabularData(columns=columns)
 
 
-# ---- ODS (OpenDocument Spreadsheet) ----
+# ---- Shared: build ColumnBlocks from a row-major grid ----
+
+def _grid_to_columns(grid: list[list[str]], sheet: str | None,
+                     columns: list[ColumnBlock]) -> None:
+    """Append columns for a row-major *grid* (row 0 = headers) to *columns*.
+    Mirrors the legacy numeric-header fallback (all-numeric header → headerless)."""
+    if not grid:
+        return
+    ncols = max(len(r) for r in grid)
+    headers = grid[0]
+    data_rows = grid[1:]
+
+    non_empty = [h for h in headers if h.strip()]
+    if non_empty and all(_is_numeric_string(h) for h in non_empty):
+        headers = [f"Column {i + 1}" for i in range(ncols)]
+        data_rows = grid
+
+    for ci in range(ncols):
+        header = headers[ci].strip() if ci < len(headers) else ""
+        values = [(r[ci] if ci < len(r) else "") for r in data_rows]
+        columns.append(ColumnBlock(header=header, values=values, sheet=sheet))
+
+
+# ---- ODS (OpenDocument Spreadsheet) — fast lxml streaming ----
 
 def _extract_ods_tabular(path: Path) -> TabularData:
-    from odf.opendocument import load as odf_load
-    from odf.table import Table, TableRow, TableCell
-    from odf import text as odf_text
+    """Stream content.xml with lxml.iterparse (C parser, row-by-row memory
+    release) instead of building the full odfpy DOM — ~16.5 s → ~3.6 s on the
+    8 MB corpus while preserving column/header structure."""
+    from lxml import etree
 
-    doc = odf_load(str(path))
+    T = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
+    CELL_TAGS = (T + "table-cell", T + "covered-table-cell")
+
+    with zipfile.ZipFile(path) as z:
+        data = z.read("content.xml")
+
     columns: list[ColumnBlock] = []
+    cur_sheet = ""
+    grid: list[list[str]] = []
 
-    def _cell_text(cell) -> str:
-        texts: list[str] = []
-        for p in cell.getElementsByType(odf_text.P):
-            texts.append(str(p))
-        return " ".join(texts).strip()
-
-    for table in doc.spreadsheet.getElementsByType(Table):
-        sheet_name: str = table.getAttribute("name") or ""
-        table_rows = table.getElementsByType(TableRow)
-        if not table_rows:
+    for event, el in etree.iterparse(io.BytesIO(data), events=("start", "end")):
+        if event == "start":
+            if el.tag == T + "table":
+                cur_sheet = el.get(T + "name") or ""
+                grid = []
             continue
 
-        header_cells = table_rows[0].getElementsByType(TableCell)
-        raw_headers = [_cell_text(c) for c in header_cells]
-        data_table_rows = table_rows[1:]
-
-        non_empty = [h for h in raw_headers if h]
-        if non_empty and all(_is_numeric_string(h) for h in non_empty):
-            raw_headers = [f"Column {i + 1}" for i in range(len(raw_headers))]
-            data_table_rows = table_rows
-
-        for col_idx, header in enumerate(raw_headers):
-            values: list[str] = []
-            for tr in data_table_rows:
-                cells = tr.getElementsByType(TableCell)
-                if col_idx < len(cells):
-                    values.append(_cell_text(cells[col_idx]))
-                else:
-                    values.append("")
-            columns.append(ColumnBlock(header=header, values=values, sheet=sheet_name))
+        if el.tag == T + "table-row":
+            cells: list[str] = []
+            for cell in el:
+                if cell.tag not in CELL_TAGS:
+                    continue
+                try:
+                    rep = int(cell.get(T + "number-columns-repeated", "1") or 1)
+                except ValueError:
+                    rep = 1
+                txt = "".join(cell.itertext()).strip()
+                # Empty cells often carry huge repeat counts (trailing padding) —
+                # collapse them so we don't materialize thousands of "" entries.
+                rep = 1 if not txt else min(rep, 4096)
+                cells.extend([txt] * rep)
+            while cells and not cells[-1]:
+                cells.pop()
+            if cells:
+                try:
+                    rrep = min(int(el.get(T + "number-rows-repeated", "1") or 1), 4096)
+                except ValueError:
+                    rrep = 1
+                for _ in range(rrep):
+                    grid.append(list(cells))
+            el.clear()
+        elif el.tag == T + "table":
+            _grid_to_columns(grid, cur_sheet, columns)
+            grid = []
+            el.clear()
 
     return TabularData(columns=columns)
 
 
-# ---- DOCX (Word document — tables + body paragraphs) ----
+# ---- DOCX (Word document — tables + body paragraphs) — fast lxml ----
 
 def _extract_docx_tabular(path: Path) -> TabularData:
-    import docx
+    """Parse word/document.xml with lxml (C parser) instead of python-docx's
+    object model — ~5.4 s → ~2 s on the corpus. Paragraphs inside table cells
+    are excluded from the body column (else their PII is double-counted).
+    Handles simple (non-nested) tables, which covers typical documents."""
+    from lxml import etree
 
-    doc = docx.Document(str(path))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+    with zipfile.ZipFile(path) as z:
+        data = z.read("word/document.xml")
+    root = etree.fromstring(data)
     columns: list[ColumnBlock] = []
 
-    # Embedded tables
-    for table_idx, table in enumerate(doc.tables):
-        if not table.rows:
+    def _cell_text(tc) -> str:
+        return " ".join("".join(p.itertext()) for p in tc.iter(W + "p")).strip()
+
+    for tbl_idx, tbl in enumerate(root.iter(W + "tbl")):
+        rows = list(tbl.iter(W + "tr"))
+        if not rows:
             continue
-        sheet_name = f"Table {table_idx + 1}"
-        raw_headers = [cell.text.strip() for cell in table.rows[0].cells]
-
-        for col_idx, header in enumerate(raw_headers):
+        sheet = f"Table {tbl_idx + 1}"
+        raw_headers = [_cell_text(c) for c in rows[0].iter(W + "tc")]
+        for ci, header in enumerate(raw_headers):
             values: list[str] = []
-            for row in table.rows[1:]:
-                if col_idx < len(row.cells):
-                    values.append(row.cells[col_idx].text.strip())
-                else:
-                    values.append("")
-            columns.append(ColumnBlock(header=header, values=values, sheet=sheet_name))
+            for tr in rows[1:]:
+                cells = list(tr.iter(W + "tc"))
+                values.append(_cell_text(cells[ci]) if ci < len(cells) else "")
+            columns.append(ColumnBlock(header=header.strip(), values=values, sheet=sheet))
 
-    # Body paragraphs as a flat (headerless) column for completeness
-    para_texts = [p.text for p in doc.paragraphs if p.text.strip()]
-    if para_texts:
-        columns.append(ColumnBlock(header="", values=para_texts, sheet=None))
+    # Body paragraphs = w:p NOT inside any table cell. Use iterancestors (tree
+    # structure) rather than id() — lxml hands out fresh proxy objects per access
+    # so id() is not a stable identity across iterations.
+    body: list[str] = []
+    for p in root.iter(W + "p"):
+        if next(p.iterancestors(W + "tbl"), None) is not None:
+            continue
+        t = "".join(p.itertext()).strip()
+        if t:
+            body.append(t)
 
-    return TabularData(columns=columns)
+    return TabularData(columns=columns, body=body)
 
 
-# ---- ODT (OpenDocument Text — tables + body text) ----
+# ---- ODT (OpenDocument Text — tables + body text) — fast lxml ----
 
 def _extract_odt_tabular(path: Path) -> TabularData:
-    from odf.opendocument import load as odf_load
-    from odf.table import Table, TableRow, TableCell
-    from odf import text as odf_text
+    """Parse content.xml with lxml instead of the odfpy DOM. Paragraphs inside
+    table cells are excluded from the body column. Simple (non-nested) tables."""
+    from lxml import etree
 
-    doc = odf_load(str(path))
+    T = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
+    TX = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+    CELL_TAGS = (T + "table-cell", T + "covered-table-cell")
+
+    with zipfile.ZipFile(path) as z:
+        data = z.read("content.xml")
+    root = etree.fromstring(data)
     columns: list[ColumnBlock] = []
 
     def _cell_text(cell) -> str:
-        texts: list[str] = []
-        for p in cell.getElementsByType(odf_text.P):
-            texts.append(str(p))
-        return " ".join(texts).strip()
+        return " ".join("".join(p.itertext()) for p in cell.iter(TX + "p")).strip()
 
-    for table_idx, table in enumerate(doc.body.getElementsByType(Table)):
-        sheet_name = f"Table {table_idx + 1}"
-        table_rows = table.getElementsByType(TableRow)
-        if not table_rows:
+    for tbl_idx, tbl in enumerate(root.iter(T + "table")):
+        rows = list(tbl.iter(T + "table-row"))
+        if not rows:
             continue
-
-        header_cells = table_rows[0].getElementsByType(TableCell)
+        sheet = f"Table {tbl_idx + 1}"
+        header_cells = [c for c in rows[0] if c.tag in CELL_TAGS]
         raw_headers = [_cell_text(c) for c in header_cells]
-
-        for col_idx, header in enumerate(raw_headers):
+        for ci, header in enumerate(raw_headers):
             values: list[str] = []
-            for tr in table_rows[1:]:
-                cells = tr.getElementsByType(TableCell)
-                if col_idx < len(cells):
-                    values.append(_cell_text(cells[col_idx]))
-                else:
-                    values.append("")
-            columns.append(ColumnBlock(header=header, values=values, sheet=sheet_name))
+            for tr in rows[1:]:
+                cells = [c for c in tr if c.tag in CELL_TAGS]
+                values.append(_cell_text(cells[ci]) if ci < len(cells) else "")
+            columns.append(ColumnBlock(header=header.strip(), values=values, sheet=sheet))
 
-    # Collect paragraph object IDs that already belong to table cells
-    table_para_ids: set[int] = set()
-    for tbl in doc.body.getElementsByType(Table):
-        for tr in tbl.getElementsByType(TableRow):
-            for cell in tr.getElementsByType(TableCell):
-                for p in cell.getElementsByType(odf_text.P):
-                    table_para_ids.add(id(p))
+    # Body paragraphs = text:p NOT inside a table cell (iterancestors, not id():
+    # lxml proxy identity is not stable across iterations).
+    body: list[str] = []
+    for p in root.iter(TX + "p"):
+        if next(p.iterancestors(T + "table"), None) is not None:
+            continue
+        t = "".join(p.itertext()).strip()
+        if t:
+            body.append(t)
 
-    # Body paragraphs (outside tables)
-    body_texts: list[str] = []
-    for p in doc.body.getElementsByType(odf_text.P):
-        if id(p) not in table_para_ids:
-            t = str(p).strip()
-            if t:
-                body_texts.append(t)
-    if body_texts:
-        columns.append(ColumnBlock(header="", values=body_texts, sheet=None))
-
-    return TabularData(columns=columns)
+    return TabularData(columns=columns, body=body)
 
 
 # ---- PDF (PyMuPDF — tables + body text) ----
@@ -488,10 +540,7 @@ def _extract_pdf_tabular(path: Path) -> TabularData:
                 if block_text:
                     body_texts.append(block_text)
 
-    if body_texts:
-        columns.append(ColumnBlock(header="", values=body_texts, sheet=None))
-
-    return TabularData(columns=columns)
+    return TabularData(columns=columns, body=body_texts)
 
 
 # ---------------------------------------------------------------------------

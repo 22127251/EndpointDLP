@@ -14,8 +14,10 @@ from orchestrator.policy_manager import PolicyManager
 
 log = logging.getLogger(__name__)
 
-# How long an accept thread waits for analysis before giving up (seconds).
-# Must be less than the client's pipe timeout (5 s in pipe_client.py).
+# Default analysis budget (seconds) when config doesn't specify one. The real
+# value comes from cfg.analysis_timeout_seconds (config.yaml service:). INVARIANT:
+# every client's pipe timeout must EXCEED this, or the client gives up before the
+# orchestrator answers (config.yaml ships analysis=10 s, client waits=12 s).
 _ANALYSIS_TIMEOUT = 4.0
 
 _CHANNELS = ("clipboard", "browser", "peripheral_storage")
@@ -24,6 +26,7 @@ _CHANNELS = ("clipboard", "browser", "peripheral_storage")
 class Dispatcher:
     def __init__(self, cfg: OrchestratorConfig, policy_manager: PolicyManager) -> None:
         self._pm = policy_manager
+        self._analysis_timeout = getattr(cfg, "analysis_timeout_seconds", _ANALYSIS_TIMEOUT)
         self._clipboard_pool = ThreadPoolExecutor(
             max_workers=cfg.clipboard_workers, thread_name_prefix="dlp-clip"
         )
@@ -134,7 +137,13 @@ class Dispatcher:
                 decision=decision,
                 violations=[
                     {"policy_id": getattr(v, "policy_id", "?"),
-                     "count": len(getattr(v, "matches", []) or [])}
+                     "count": len(getattr(v, "matches", []) or []),
+                     "action": getattr(v, "action", ""),
+                     "with_context": sum(
+                         1 for m in (getattr(v, "matches", []) or [])
+                         if getattr(m, "has_context", False)
+                     ),
+                     "context_words": list(getattr(v, "context_words", []) or [])}
                     for v in violations
                 ],
                 elapsed_ms=elapsed_ms,
@@ -155,12 +164,12 @@ class Dispatcher:
             req_id=req_id,
         )
         try:
-            decision, violations = future.result(timeout=_ANALYSIS_TIMEOUT)
+            decision, violations = future.result(timeout=self._analysis_timeout)
             reason = _format_block_reason(violations) if decision == "BLOCK" else ""
             return decision, reason, violations
         except FutureTimeoutError:
-            log.error("timeout req=%s channel=browser after %.1fs; failing closed",
-                      req_id, _ANALYSIS_TIMEOUT)
+            log.error("reason=timeout req=%s channel=browser after %.1fs; failing closed",
+                      req_id, self._analysis_timeout)
             future.cancel()
             return "BLOCK", "Analysis timed out", []
         except Exception as exc:
@@ -178,11 +187,11 @@ class Dispatcher:
             req_id=req_id,
         )
         try:
-            decision, violations = future.result(timeout=_ANALYSIS_TIMEOUT)
+            decision, violations = future.result(timeout=self._analysis_timeout)
             return decision, violations
         except FutureTimeoutError:
-            log.error("timeout req=%s channel=peripheral_storage after %.1fs; failing closed",
-                      req_id, _ANALYSIS_TIMEOUT)
+            log.error("reason=timeout req=%s channel=peripheral_storage after %.1fs; failing closed",
+                      req_id, self._analysis_timeout)
             future.cancel()
             return "BLOCK", []
         except Exception as exc:
@@ -211,9 +220,9 @@ class Dispatcher:
                 req_id=req_id,
             )
             try:
-                decision, violations = future.result(timeout=_ANALYSIS_TIMEOUT)
+                decision, violations = future.result(timeout=self._analysis_timeout)
             except FutureTimeoutError:
-                log.error("timeout req=%s clip_seq=%d; failing closed", req_id, seq)
+                log.error("reason=timeout req=%s clip_seq=%d; failing closed", req_id, seq)
                 future.cancel()
                 decision = "BLOCK"
             except Exception as exc:

@@ -25,9 +25,10 @@ pyyaml           # YAML policy loader
 pyahocorasick
 
 # File extraction
-python-docx      # .docx (MS Word)
+lxml             # fast streaming parse of docx/ods/odt tabular extraction (C libxml2)
 openpyxl         # .xlsx (MS Excel)
+python-docx      # .docx plain-text fallback (tabular path uses lxml)
 python-pptx      # .pptx (MS PowerPoint)
-odfpy            # .odt / .ods / .odp (OpenDocument)
+odfpy            # .odt / .ods / .odp plain-text fallback (tabular path uses lxml)
 PyMuPDF          # .pdf  (pre-built wheels for Python 3.13 Windows via Stable ABI)
 pymupdf-layout==1.27.2.2  # AI-guided find_tables(); version must match PyMuPDF==1.27.2.2

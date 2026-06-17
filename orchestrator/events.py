@@ -41,8 +41,12 @@ def record_decision(
     req_id: str,
     superseded: bool = False,
 ) -> None:
-    """Emit one audit line. ``violations`` is a list of ``{"policy_id","count"}``
-    objects (count = number of matches for that policy)."""
+    """Emit one audit line. ``violations`` is a list of
+    ``{"policy_id","count","action","with_context","context_words"}`` objects —
+    count = matches for that policy, action = the strongest action it resolved to,
+    with_context = how many matches had a confidence-boosting context word, and
+    context_words = the distinct context words that triggered those boosts (generic
+    terms only — never the matched value)."""
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     rec: dict = {
         "ts": ts,

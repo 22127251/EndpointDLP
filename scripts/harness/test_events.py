@@ -20,8 +20,10 @@ def _cfg():
 
 
 class _Violation:
-    def __init__(self, policy_id: str) -> None:
+    def __init__(self, policy_id: str, action: str = "block", context_words=None) -> None:
         self.policy_id = policy_id
+        self.action = action
+        self.context_words = context_words or []
         self.matches = ["m"]
 
 
@@ -88,8 +90,11 @@ def test_browser_block_event_has_violation_ids(events_capture):
     assert reason.startswith("Sensitive data detected")
     rec = json.loads(events_capture[0])
     assert rec["decision"] == "BLOCK"
-    # violations are {policy_id, count} objects; _Violation has matches=["m"] → 1.
-    assert rec["violations"] == [{"policy_id": "block_visa_browser", "count": 1}]
+    # violations are {policy_id, count, action, with_context, context_words} objects;
+    # _Violation has matches=["m"] (no has_context) → count 1, with_context 0.
+    assert rec["violations"] == [
+        {"policy_id": "block_visa_browser", "count": 1, "action": "block",
+         "with_context": 0, "context_words": []}]
 
 
 def test_browser_url_query_stripped(events_capture):
@@ -113,7 +118,9 @@ def test_peripheral_block_keeps_empty_client_reason(events_capture):
     assert disp.analyze(req) == ("BLOCK", True, "")
     rec = json.loads(events_capture[0])
     assert rec["channel"] == "peripheral_storage"
-    assert rec["violations"] == [{"policy_id": "block_cccd", "count": 1}]
+    assert rec["violations"] == [
+        {"policy_id": "block_cccd", "count": 1, "action": "block",
+         "with_context": 0, "context_words": []}]
     assert rec["name"] == "id.docx"
 
 

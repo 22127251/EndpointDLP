@@ -54,6 +54,7 @@ class _ReloadHandler(FileSystemEventHandler):
 
 class PolicyManager:
     def __init__(self, config: OrchestratorConfig) -> None:
+        self._cfg = config
         repo_root = Path(__file__).parent.parent
         self._policies_file = str(repo_root / config.policies_file)
         log.info("Loading policies from %s", self._policies_file)
@@ -112,6 +113,14 @@ class PolicyManager:
         self._observer.stop()
         self._observer.join()
 
+    def _oversize_verdict(self, channel: str, req_id: str, detail: str) -> tuple[str, list]:
+        """Verdict for input over the size cap. Per-channel fail behavior
+        (default 'block' = fail-closed); the reason is recorded in the log."""
+        behavior = (getattr(self._cfg, "oversize_fail_behavior", None) or {}).get(channel, "block")
+        decision = "ALLOW" if behavior == "allow" else "BLOCK"
+        log.warning("reason=size_limit req=%s channel=%s %s -> %s", req_id, channel, detail, decision)
+        return decision, []
+
     def analyze(
         self,
         channel: str,
@@ -124,6 +133,10 @@ class PolicyManager:
             engine = self._engine  # snapshot — lock release/acquire orders strictly against reload
         if kind == "text":
             body = text or ""
+            nbytes = len(body.encode("utf-8", "ignore"))
+            cap = getattr(self._cfg, "max_clipboard_bytes", 1 << 60)
+            if nbytes > cap:
+                return self._oversize_verdict(channel, req_id, f"text bytes={nbytes} > cap={cap}")
             result = engine.analyze(body, channel)
             content_label = (
                 f"size={len(body)} hash={hashlib.sha256(body.encode()).hexdigest()[:8]}"
@@ -134,6 +147,14 @@ class PolicyManager:
                 return "BLOCK", []
             filename = os.path.basename(file_path)
             size = os.path.getsize(file_path)
+            cap = getattr(self._cfg, "max_file_bytes", 1 << 60)
+            if size > cap:
+                verdict = self._oversize_verdict(channel, req_id, f"file={filename} size={size} > cap={cap}")
+                try:
+                    os.unlink(file_path)
+                except OSError as e:
+                    log.warning("Could not delete oversized temp file %s: %s", file_path, e)
+                return verdict
             content_label = f"file={filename} size={size}"
             try:
                 if is_tabular(file_path):
@@ -167,7 +188,11 @@ class PolicyManager:
 
 
 def _fmt_violations(violations: list) -> str:
-    return " ".join(
-        f"{v.policy_id}({v.action})×{len(v.matches)}"
-        for v in violations
-    )
+    parts = []
+    for v in violations:
+        s = f"{v.policy_id}({v.action})×{len(v.matches)}"
+        cws = getattr(v, "context_words", None)
+        if cws:
+            s += f"[ctx:{','.join(cws)}]"
+        parts.append(s)
+    return " ".join(parts)

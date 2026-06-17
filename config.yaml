@@ -18,6 +18,12 @@ pools:
 limits:
   max_clipboard_bytes: 1048576       # 1 MB
   max_file_bytes:      104857600     # 100 MB (browser)
+  # Verdict when input exceeds the cap, per channel. "block" = fail-closed
+  # (default), "allow" = fail-open. The reason is logged as reason=size_limit.
+  oversize_fail_behavior:
+    clipboard:          block
+    browser:            block
+    peripheral_storage: block
 
 supervisor:                          # Consumed in Phase C; harmless to keep now.
   max_restarts: 3
@@ -25,7 +31,10 @@ supervisor:                          # Consumed in Phase C; harmless to keep now
   stable_uptime_reset_seconds: 60
 
 service:                             # Phase F: graceful drain on stop.
-  drain_timeout_seconds: 8           # SvcStop waits up to this for in-flight analyses
+  drain_timeout_seconds: 12          # SvcStop waits up to this for in-flight analyses (≥ analysis timeout)
+  # Orchestrator analysis budget. INVARIANT: every client pipe timeout below must
+  # exceed this (client waits 12 s > analysis 10 s) or the client gives up early.
+  analysis_timeout_seconds: 10
 
 paths:
   mitmdump_exe: ""                   # auto-detect in venv if empty
@@ -61,10 +70,10 @@ install:
 # ── Per-component sections (each component reads ONLY its own subtree) ──
 
 clipboard:
-  pipe_timeout_ms: 6000              # was hardcoded in PipeAgentCore.cs:13
+  pipe_timeout_ms: 12000             # client wait > orchestrator analysis (10 s)
 
 browser:                             # All fields migrated from interceptors/browser/config.yaml.
-  pipe_timeout_seconds: 5
+  pipe_timeout_seconds: 12           # client wait > orchestrator analysis (10 s)
   fail_behavior: "open"             # "allow" | "block" on pipe error
   temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp"   # empty → system %TEMP%
   min_upload_size_bytes: 1024
@@ -145,7 +154,7 @@ peripheral_storage:                  # Controller reads this whole subtree.
 
   transfer_agent:                    # TransferAgent reads only this nested subtree.
     connect_timeout_ms: 5000         # was hardcoded in OrchestratorClient.cs:24
-    analysis_timeout_seconds: 10     # was hardcoded in OrchestratorClient.cs:25
+    analysis_timeout_seconds: 12     # client wait > orchestrator analysis (10 s)
 
 # ── Phase AC-3: App Control (WDAC) channel (orchestrator-internal daemon threads) ──
 # The channel runs inside run_core; it watches an inbox drop-folder for compiled

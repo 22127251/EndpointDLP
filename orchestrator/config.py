@@ -42,6 +42,13 @@ class OrchestratorConfig:
     # don't need to enumerate them.
     admin_pipe: str = "\\\\.\\pipe\\dlp_agent_admin"
     drain_timeout_seconds: int = 8
+    # How long the orchestrator waits for an analysis before failing closed.
+    # Sourced from service.analysis_timeout_seconds; client pipe timeouts must
+    # exceed this. Default 4.0 keeps the harness (no `service` section) unchanged.
+    analysis_timeout_seconds: float = 4.0
+    # Per-channel verdict when input exceeds the size cap ("block" = fail-closed,
+    # the default; "allow" = fail-open). Sourced from limits.oversize_fail_behavior.
+    oversize_fail_behavior: dict = field(default_factory=dict)
     # Phase AC-3 additions — the App Control (WDAC) channel. Sourced from the
     # app_control: section in config.yaml. Defaulted so pre-AC-3 fixtures that
     # build the dataclass directly (test_supervisor.py:_minimal_config) don't need
@@ -113,6 +120,8 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         ),
         admin_pipe=raw.get("admin_pipe", "\\\\.\\pipe\\dlp_agent_admin"),
         drain_timeout_seconds=service.get("drain_timeout_seconds", 8),
+        analysis_timeout_seconds=float(service.get("analysis_timeout_seconds", 4.0)),
+        oversize_fail_behavior=dict(limits.get("oversize_fail_behavior", {}) or {}),
         app_control_enabled=app_control.get("enabled", True),
         app_control_inbox_dir=app_control.get("inbox_dir", ""),
         app_control_rejected_dir=app_control.get("rejected_dir", ""),
