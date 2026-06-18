@@ -31,6 +31,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+class ExtractionTooLarge(Exception):
+    """Raised when the running count of extracted characters exceeds the
+    configured ``max_chars`` cap. Streaming extractors raise this *during* the
+    parse (before the full body is materialized) so a pathological file cannot
+    OOM the process; the orchestrator maps it to the channel's failure_mode
+    (reason=text_cap). Carries the char count seen at the abort point."""
+
+    def __init__(self, char_count: int):
+        self.char_count = char_count
+        super().__init__(f"extracted text exceeded cap ({char_count} chars)")
+
+
+# ---------------------------------------------------------------------------
 # Tabular data types
 # ---------------------------------------------------------------------------
 
@@ -72,22 +88,32 @@ def is_tabular(file_path: str | Path) -> bool:
 # Plain-text extraction
 # ---------------------------------------------------------------------------
 
-def extract_text(file_path: str | Path) -> str:
-    """Return all readable text from *file_path* as a single string."""
+def extract_text(file_path: str | Path, max_chars: int | None = None) -> str:
+    """Return all readable text from *file_path* as a single string.
+
+    If *max_chars* is set and the extracted text exceeds it, raise
+    ExtractionTooLarge. For these formats the check is post-hoc: the input is
+    already bounded by the orchestrator's max_file_bytes and none of them is the
+    14×-expanding case. The office formats that *do* blow up (docx/odt/ods/xlsx)
+    go through extract_tabular, which enforces the cap during the parse."""
     path = Path(file_path)
     suffix = path.suffix.lower()
 
     if suffix == ".docx":
-        return _extract_docx(path)
-    if suffix == ".xlsx":
-        return _extract_xlsx(path)
-    if suffix == ".pptx":
-        return _extract_pptx(path)
-    if suffix in {".odt", ".ods", ".odp"}:
-        return _extract_odf(path)
-    if suffix == ".pdf":
-        return _extract_pdf(path)
-    return _extract_plaintext(path)
+        text = _extract_docx(path)
+    elif suffix == ".xlsx":
+        text = _extract_xlsx(path)
+    elif suffix == ".pptx":
+        text = _extract_pptx(path)
+    elif suffix in {".odt", ".ods", ".odp"}:
+        text = _extract_odf(path)
+    elif suffix == ".pdf":
+        text = _extract_pdf(path)
+    else:
+        text = _extract_plaintext(path)
+    if max_chars is not None and len(text) > max_chars:
+        raise ExtractionTooLarge(len(text))
+    return text
 
 
 def _extract_plaintext(path: Path) -> str:
@@ -173,28 +199,50 @@ def _extract_pdf(path: Path) -> str:
 # Tabular extraction
 # ---------------------------------------------------------------------------
 
-def extract_tabular(file_path: str | Path) -> TabularData:
-    """Extract column-structured data from tabular and document files."""
+def extract_tabular(file_path: str | Path, max_chars: int | None = None) -> TabularData:
+    """Extract column-structured data from tabular and document files.
+
+    If *max_chars* is set, extraction is refused once the running count of
+    extracted characters exceeds it (ExtractionTooLarge). The streaming office
+    readers (docx/odt/ods/xlsx) enforce it *during* the parse so a zip-expanding
+    file cannot OOM the process before any post-hoc check; csv/pdf — bounded by
+    max_file_bytes and not subject to zip expansion — are checked once after."""
     path = Path(file_path)
     suffix = path.suffix.lower()
 
     if suffix == ".csv":
-        return _extract_csv_tabular(path, delimiter=",")
-    if suffix == ".tsv":
-        return _extract_csv_tabular(path, delimiter="\t")
-    if suffix == ".xlsx":
-        return _extract_xlsx_tabular(path)
-    if suffix == ".ods":
-        return _extract_ods_tabular(path)
-    if suffix == ".docx":
-        return _extract_docx_tabular(path)
-    if suffix == ".odt":
-        return _extract_odt_tabular(path)
-    if suffix == ".pdf":
-        return _extract_pdf_tabular(path)
-    # Fallback: no table structure — treat the whole file as free-text body.
-    text = extract_text(path)
-    return TabularData(columns=[], body=text.splitlines())
+        td = _extract_csv_tabular(path, delimiter=",")
+    elif suffix == ".tsv":
+        td = _extract_csv_tabular(path, delimiter="\t")
+    elif suffix == ".xlsx":
+        return _extract_xlsx_tabular(path, max_chars)
+    elif suffix == ".ods":
+        return _extract_ods_tabular(path, max_chars)
+    elif suffix == ".docx":
+        return _extract_docx_tabular(path, max_chars)
+    elif suffix == ".odt":
+        return _extract_odt_tabular(path, max_chars)
+    elif suffix == ".pdf":
+        td = _extract_pdf_tabular(path)
+    else:
+        # Fallback: no table structure — treat the whole file as free-text body.
+        text = extract_text(path, max_chars)
+        return TabularData(columns=[], body=text.splitlines())
+    _enforce_tabular_cap(td, max_chars)
+    return td
+
+
+def _enforce_tabular_cap(td: TabularData, max_chars: int | None) -> None:
+    """Post-hoc extracted-text cap for the non-streaming tabular readers
+    (csv/pdf): raise ExtractionTooLarge if the total extracted characters exceed
+    *max_chars*. Counts cell values + body (headers are negligible), matching the
+    running count the streaming readers accumulate."""
+    if max_chars is None:
+        return
+    total = (sum(len(v) for c in td.columns for v in c.values)
+             + sum(len(b) for b in td.body))
+    if total > max_chars:
+        raise ExtractionTooLarge(total)
 
 
 # ---- CSV / TSV ----
@@ -229,14 +277,23 @@ def _extract_csv_tabular(path: Path, delimiter: str = ",") -> TabularData:
 
 # ---- Excel (.xlsx) ----
 
-def _extract_xlsx_tabular(path: Path) -> TabularData:
+def _extract_xlsx_tabular(path: Path, max_chars: int | None = None) -> TabularData:
     import openpyxl
 
     wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     columns: list[ColumnBlock] = []
+    char_count = 0
 
     for sheet in wb.worksheets:
-        rows = list(sheet.iter_rows(values_only=True))
+        # Stream rows (openpyxl read_only yields lazily) and accumulate the char
+        # count so the cap aborts before the whole — possibly huge — sheet is
+        # materialized, rather than after.
+        rows = []
+        for row in sheet.iter_rows(values_only=True):
+            rows.append(row)
+            char_count += sum(len(str(c)) for c in row if c is not None)
+            if max_chars is not None and char_count > max_chars:
+                raise ExtractionTooLarge(char_count)
         if not rows:
             continue
 
@@ -283,10 +340,12 @@ def _grid_to_columns(grid: list[list[str]], sheet: str | None,
 
 # ---- ODS (OpenDocument Spreadsheet) — fast lxml streaming ----
 
-def _extract_ods_tabular(path: Path) -> TabularData:
+def _extract_ods_tabular(path: Path, max_chars: int | None = None) -> TabularData:
     """Stream content.xml with lxml.iterparse (C parser, row-by-row memory
     release) instead of building the full odfpy DOM — ~16.5 s → ~3.6 s on the
-    8 MB corpus while preserving column/header structure."""
+    8 MB corpus while preserving column/header structure. A running character
+    count over the (repeat-expanded) cell text raises ExtractionTooLarge mid-parse
+    when *max_chars* is exceeded."""
     from lxml import etree
 
     T = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
@@ -298,6 +357,7 @@ def _extract_ods_tabular(path: Path) -> TabularData:
     columns: list[ColumnBlock] = []
     cur_sheet = ""
     grid: list[list[str]] = []
+    char_count = 0
 
     for event, el in etree.iterparse(io.BytesIO(data), events=("start", "end")):
         if event == "start":
@@ -329,6 +389,9 @@ def _extract_ods_tabular(path: Path) -> TabularData:
                     rrep = 1
                 for _ in range(rrep):
                     grid.append(list(cells))
+                char_count += sum(len(c) for c in cells) * rrep
+                if max_chars is not None and char_count > max_chars:
+                    raise ExtractionTooLarge(char_count)
             el.clear()
         elif el.tag == T + "table":
             _grid_to_columns(grid, cur_sheet, columns)
@@ -340,55 +403,86 @@ def _extract_ods_tabular(path: Path) -> TabularData:
 
 # ---- DOCX (Word document — tables + body paragraphs) — fast lxml ----
 
-def _extract_docx_tabular(path: Path) -> TabularData:
-    """Parse word/document.xml with lxml (C parser) instead of python-docx's
-    object model — ~5.4 s → ~2 s on the corpus. Paragraphs inside table cells
-    are excluded from the body column (else their PII is double-counted).
-    Handles simple (non-nested) tables, which covers typical documents."""
+def _extract_docx_tabular(path: Path, max_chars: int | None = None) -> TabularData:
+    """Stream word/document.xml with lxml.iterparse (C parser, element-by-element
+    memory release) instead of building the whole tree with etree.fromstring —
+    bounds extraction memory for huge documents and provides the early-abort hook
+    (mirrors the ODS streamer). Paragraphs inside table cells are excluded from
+    the body column (else their PII is double-counted). Handles simple
+    (non-nested) tables, which covers typical documents.
+
+    A running character count is accumulated across body paragraphs and table
+    cell values; if *max_chars* is set and the count exceeds it, raise
+    ExtractionTooLarge mid-parse so a pathological file is refused before its
+    full text is materialized."""
     from lxml import etree
 
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
     with zipfile.ZipFile(path) as z:
         data = z.read("word/document.xml")
-    root = etree.fromstring(data)
-    columns: list[ColumnBlock] = []
 
     def _cell_text(tc) -> str:
         return " ".join("".join(p.itertext()) for p in tc.iter(W + "p")).strip()
 
-    for tbl_idx, tbl in enumerate(root.iter(W + "tbl")):
-        rows = list(tbl.iter(W + "tr"))
-        if not rows:
-            continue
-        sheet = f"Table {tbl_idx + 1}"
-        raw_headers = [_cell_text(c) for c in rows[0].iter(W + "tc")]
-        for ci, header in enumerate(raw_headers):
-            values: list[str] = []
-            for tr in rows[1:]:
-                cells = list(tr.iter(W + "tc"))
-                values.append(_cell_text(cells[ci]) if ci < len(cells) else "")
-            columns.append(ColumnBlock(header=header.strip(), values=values, sheet=sheet))
-
-    # Body paragraphs = w:p NOT inside any table cell. Use iterancestors (tree
-    # structure) rather than id() — lxml hands out fresh proxy objects per access
-    # so id() is not a stable identity across iterations.
+    columns: list[ColumnBlock] = []
     body: list[str] = []
-    for p in root.iter(W + "p"):
-        if next(p.iterancestors(W + "tbl"), None) is not None:
+    char_count = 0
+    tbl_idx = 0
+    tbl_depth = 0  # >0 while inside a (possibly nested) table; body p's are skipped
+
+    for event, el in etree.iterparse(io.BytesIO(data), events=("start", "end")):
+        tag = el.tag
+        if event == "start":
+            if tag == W + "tbl":
+                tbl_depth += 1
             continue
-        t = "".join(p.itertext()).strip()
-        if t:
-            body.append(t)
+
+        if tag == W + "tbl":
+            tbl_depth -= 1
+            if tbl_depth != 0:  # inner table; outer end processes the whole tree
+                continue
+            sheet = f"Table {tbl_idx + 1}"
+            tbl_idx += 1
+            rows = list(el.iter(W + "tr"))
+            if rows:
+                raw_headers = [_cell_text(c) for c in rows[0].iter(W + "tc")]
+                for ci, header in enumerate(raw_headers):
+                    values: list[str] = []
+                    for tr in rows[1:]:
+                        cells = list(tr.iter(W + "tc"))
+                        v = _cell_text(cells[ci]) if ci < len(cells) else ""
+                        values.append(v)
+                        char_count += len(v)
+                    columns.append(ColumnBlock(header=header.strip(), values=values, sheet=sheet))
+                if max_chars is not None and char_count > max_chars:
+                    raise ExtractionTooLarge(char_count)
+            el.clear()
+        elif tag == W + "p" and tbl_depth == 0:
+            # Body paragraph (w:p not inside a table). Word does not nest
+            # paragraphs, so clearing on end is safe.
+            t = "".join(el.itertext()).strip()
+            if t:
+                body.append(t)
+                char_count += len(t)
+                if max_chars is not None and char_count > max_chars:
+                    raise ExtractionTooLarge(char_count)
+            el.clear()
 
     return TabularData(columns=columns, body=body)
 
 
 # ---- ODT (OpenDocument Text — tables + body text) — fast lxml ----
 
-def _extract_odt_tabular(path: Path) -> TabularData:
-    """Parse content.xml with lxml instead of the odfpy DOM. Paragraphs inside
-    table cells are excluded from the body column. Simple (non-nested) tables."""
+def _extract_odt_tabular(path: Path, max_chars: int | None = None) -> TabularData:
+    """Stream content.xml with lxml.iterparse instead of building the whole tree
+    with etree.fromstring — bounds extraction memory and provides the early-abort
+    hook (mirrors the ODS streamer). Paragraphs inside table cells are excluded
+    from the body column. Simple (non-nested) tables.
+
+    Accumulates a running character count over body paragraphs and table cell
+    values; if *max_chars* is set and the count exceeds it, raise
+    ExtractionTooLarge mid-parse."""
     from lxml import etree
 
     T = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
@@ -397,35 +491,54 @@ def _extract_odt_tabular(path: Path) -> TabularData:
 
     with zipfile.ZipFile(path) as z:
         data = z.read("content.xml")
-    root = etree.fromstring(data)
-    columns: list[ColumnBlock] = []
 
     def _cell_text(cell) -> str:
         return " ".join("".join(p.itertext()) for p in cell.iter(TX + "p")).strip()
 
-    for tbl_idx, tbl in enumerate(root.iter(T + "table")):
-        rows = list(tbl.iter(T + "table-row"))
-        if not rows:
-            continue
-        sheet = f"Table {tbl_idx + 1}"
-        header_cells = [c for c in rows[0] if c.tag in CELL_TAGS]
-        raw_headers = [_cell_text(c) for c in header_cells]
-        for ci, header in enumerate(raw_headers):
-            values: list[str] = []
-            for tr in rows[1:]:
-                cells = [c for c in tr if c.tag in CELL_TAGS]
-                values.append(_cell_text(cells[ci]) if ci < len(cells) else "")
-            columns.append(ColumnBlock(header=header.strip(), values=values, sheet=sheet))
-
-    # Body paragraphs = text:p NOT inside a table cell (iterancestors, not id():
-    # lxml proxy identity is not stable across iterations).
+    columns: list[ColumnBlock] = []
     body: list[str] = []
-    for p in root.iter(TX + "p"):
-        if next(p.iterancestors(T + "table"), None) is not None:
+    char_count = 0
+    tbl_idx = 0
+    tbl_depth = 0  # >0 while inside a (possibly nested) table; body p's are skipped
+
+    for event, el in etree.iterparse(io.BytesIO(data), events=("start", "end")):
+        tag = el.tag
+        if event == "start":
+            if tag == T + "table":
+                tbl_depth += 1
             continue
-        t = "".join(p.itertext()).strip()
-        if t:
-            body.append(t)
+
+        if tag == T + "table":
+            tbl_depth -= 1
+            if tbl_depth != 0:  # inner table; outer end processes the whole tree
+                continue
+            sheet = f"Table {tbl_idx + 1}"
+            tbl_idx += 1
+            rows = list(el.iter(T + "table-row"))
+            if rows:
+                header_cells = [c for c in rows[0] if c.tag in CELL_TAGS]
+                raw_headers = [_cell_text(c) for c in header_cells]
+                for ci, header in enumerate(raw_headers):
+                    values: list[str] = []
+                    for tr in rows[1:]:
+                        cells = [c for c in tr if c.tag in CELL_TAGS]
+                        v = _cell_text(cells[ci]) if ci < len(cells) else ""
+                        values.append(v)
+                        char_count += len(v)
+                    columns.append(ColumnBlock(header=header.strip(), values=values, sheet=sheet))
+                if max_chars is not None and char_count > max_chars:
+                    raise ExtractionTooLarge(char_count)
+            el.clear()
+        elif tag == TX + "p" and tbl_depth == 0:
+            # Body paragraph (text:p not inside a table). ODF paragraphs do not
+            # nest, so clearing on end is safe.
+            t = "".join(el.itertext()).strip()
+            if t:
+                body.append(t)
+                char_count += len(t)
+                if max_chars is not None and char_count > max_chars:
+                    raise ExtractionTooLarge(char_count)
+            el.clear()
 
     return TabularData(columns=columns, body=body)
 

@@ -11,7 +11,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from analyzer.engine import DLPEngine
-from analyzer.extractor import extract_tabular, extract_text, is_tabular
+from analyzer.extractor import ExtractionTooLarge, extract_tabular, extract_text, is_tabular
 from orchestrator.config import OrchestratorConfig
 
 log = logging.getLogger(__name__)
@@ -156,11 +156,22 @@ class PolicyManager:
                     log.warning("Could not delete oversized temp file %s: %s", file_path, e)
                 return verdict
             content_label = f"file={filename} size={size}"
+            cap_chars = self._cfg.max_extracted_chars
+            max_chars = cap_chars if cap_chars and cap_chars > 0 else None
             try:
                 if is_tabular(file_path):
-                    result = engine.analyze_tabular(extract_tabular(file_path), channel)
+                    result = engine.analyze_tabular(
+                        extract_tabular(file_path, max_chars=max_chars), channel)
                 else:
-                    result = engine.analyze(extract_text(file_path), channel)
+                    result = engine.analyze(
+                        extract_text(file_path, max_chars=max_chars), channel)
+            except ExtractionTooLarge as exc:
+                # Extracted text over analyzer.max_extracted_chars — refuse the
+                # analysis and follow the channel's failure_mode (like oversize).
+                decision = self._cfg.verdict_for(channel)
+                log.warning("reason=text_cap req=%s channel=%s file=%s chars=%d > cap=%s -> %s",
+                            req_id, channel, filename, exc.char_count, cap_chars, decision)
+                return decision, []
             finally:
                 try:
                     os.unlink(file_path)

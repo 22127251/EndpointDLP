@@ -42,7 +42,8 @@ _REPO = _HERE.parent
 sys.path.insert(0, str(_REPO / "analyzer"))
 
 from engine import DLPEngine, normalize_ws            # noqa: E402
-from extractor import extract_tabular, extract_text, is_tabular  # noqa: E402
+from extractor import (                                # noqa: E402
+    ExtractionTooLarge, extract_tabular, extract_text, is_tabular)
 
 # --- verify.py-style oracle (independent of the engine) ----------------------
 RE_VISA = re.compile(r"(?<!\d)4\d{3} ?\d{4} ?\d{4} ?\d{4}(?!\d)")
@@ -125,6 +126,10 @@ def main() -> int:
                     help="include non-PII (confidential keyword) matches in the per-match "
                          "outputs; by default they are only counted in the summary to keep "
                          "matches.csv focused on VISA/CCCD/phone")
+    ap.add_argument("--max-chars", type=int, default=None,
+                    help="extracted-text cap (chars), mirroring analyzer.max_extracted_chars. "
+                         "Files over it are refused at extraction and counted as a valid BLOCK "
+                         "(not a parity check). Default: no cap (full-parity regression gate).")
     args = ap.parse_args()
 
     channel = "peripheral_storage" if args.channel == "peripheral" else args.channel
@@ -151,18 +156,30 @@ def main() -> int:
         for f in files:
             fmt = f.suffix.lower().lstrip(".")
             t0 = time.perf_counter()
-            if is_tabular(f):
-                td = extract_tabular(f)
-                result = engine.analyze_tabular(td, channel)
-                mode = "tabular"
-                oracle_text = "\n".join(
-                    ["\n".join([c.header, *c.values]) for c in td.columns]
-                    + list(td.body))
-            else:
-                text = normalize_ws(extract_text(f))
-                result = engine.analyze(text, channel)
-                mode = "plain"
-                oracle_text = text
+            try:
+                if is_tabular(f):
+                    td = extract_tabular(f, max_chars=args.max_chars)
+                    result = engine.analyze_tabular(td, channel)
+                    mode = "tabular"
+                    oracle_text = "\n".join(
+                        ["\n".join([c.header, *c.values]) for c in td.columns]
+                        + list(td.body))
+                else:
+                    text = normalize_ws(extract_text(f, max_chars=args.max_chars))
+                    result = engine.analyze(text, channel)
+                    mode = "plain"
+                    oracle_text = text
+            except ExtractionTooLarge as e:
+                # Over the cap → refused at extraction, exactly like the orchestrator.
+                # The deny corpus expects a BLOCK, so a capped file is a valid PASS;
+                # the parity check is skipped (no full analysis was performed).
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                mm = re.search(r"_(b[123])\.", f.name)
+                expected = _EXPECTED.get(mm.group(1)) if mm else None
+                zeros = {"VISA": 0, "CCCD": 0, "PHONE": 0}
+                summary_rows.append((f.name, "capped", zeros, zeros, expected, e.char_count,
+                                     elapsed_ms, "block", True, True, True))
+                continue
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
             # analyzer per-type counts (+ confidential keyword count)

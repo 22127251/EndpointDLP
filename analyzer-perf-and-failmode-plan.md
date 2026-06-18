@@ -1,9 +1,11 @@
 # Analyzer memory/perf hardening + unified per-channel failure handling
 
-**Status: Phases 0, 1, 2 DONE. NEXT SESSION = Phase 4 then Phase 5** (the extracted-text cap, enforced
-during extraction — see the measured memory budget under "Pre-tested commands"; this is the lever that
-puts the 7-worker worst case at ~1.0 GB / ≤2 GB on the 8 GB VM). **Phase 3 (calamine) and Phase 6
-(single-pass) are deferred** — they only trim further and are NOT required for the 2 GB target.
+**Status: Phases 0, 1, 2, 4, 5 DONE. The ~2 GB / 8 GB-VM memory target is MET** — with the 16M-char
+cap enforced during extraction, the production-shape 7-worker worst case measures **1.07 GB** (mem_bench
+reader; both the all-capped 93 MB-body docx case and the under-cap odt_b1 case). **Phase 3 (calamine)
+and Phase 6 (single-pass) remain deferred** — they only trim further and are NOT required for the target.
+**Remaining: Phase 7** (C#/C++/addon client config polish + client pipe-fail honors `failure_mode`;
+needs the C# build + a clean-VM run — do last). Phase 3 may be picked up in a later session.
 Separate from `analyzer-fix-and-test-plan.md` and `analyzer-body-context-fix-plan.md`.
 Each phase is **independently implementable, verifiable, and markable done**, so work can
 stop/resume across sessions. (Original execution order was the phase numbering; reprioritized to 4→5
@@ -173,7 +175,29 @@ tmp/p2_out` ALL PASS; tracemalloc peak on docx_b3 < 0.5 GB.
 **Done when:** counts identical AND ods/xlsx extraction <1 s. **Feasibility: wheel + speed confirmed;
 value parity to be confirmed by the iso_test gate.**
 
-## Phase 4 — Streaming docx/odt extraction + early-abort hook — `analyzer/extractor.py`
+## Phase 4 — Streaming docx/odt extraction + early-abort hook — ✅ DONE
+`analyzer/extractor.py` only. Added module-level `ExtractionTooLarge(char_count)`. Rewrote
+`_extract_docx_tabular` / `_extract_odt_tabular` from `etree.fromstring(whole)` → single-pass
+`etree.iterparse(events=("start","end"))` + `el.clear()` (mirrors the ODS streamer). **Body detection
+switched from post-hoc `iterancestors` to a `tbl_depth` counter** (incremented on `tbl`/`table` start,
+decremented on end): a body `w:p`/`text:p` is collected+cleared only at `tbl_depth==0`; an OUTERMOST
+table is processed (then `el.clear()`-ed) at its end event, so cell paragraphs stay intact for table
+extraction and never enter the body. `tbl_idx` increments per outermost table (== every table for the
+non-nested scope the docstrings already declare). Both functions gained `max_chars: int | None = None`
+(default None = no cap; **public `extract_tabular` signature unchanged — Phase 5 plumbs it**); a running
+`char_count` over body paragraphs + table cell values raises `ExtractionTooLarge` mid-parse once it
+exceeds the cap.
+Verified: extraction output **byte-identical** (sha256 fingerprint of cols/headers/values/body on
+docx_b1–b3 + odt_b1–b3 — `tmp/p4_fingerprint.py`, only timing differs); `pytest scripts/harness/ -q` =
+**138 passed, 3 skipped**; `iso_test --corpus tmp/final-demo/deny` = **ALL PASS 24/24** (analyzer==oracle,
+docx/odt 10/30/80, docx_b3 7.1 s / odt_b3 7.1 s, under the 10 s timeout). **Extract-only peak RSS
+(mem_bench `--worker --extract-only`): docx_b3 528→349 MB, odt_b3 524→351 MB** (full tree no longer
+materialized). Abort hook confirmed: cap=1M aborts at ~1.0004M chars (before the 93M-char body builds);
+no-cap / generous-cap path extracts fully. Phase 5 next: wire `analyzer.max_extracted_chars` →
+`extract_tabular`/`extract_text` → these readers, and map `ExtractionTooLarge` to `verdict_for(channel)`
+with `reason=text_cap` in `policy_manager`.
+
+## Phase 4 (original detail, retained) — `analyzer/extractor.py`
 **Goal:** stop building the full lxml tree for huge docs (bounds extraction memory) and provide the
 abort hook Phase 5 uses.
 **Steps**
@@ -184,7 +208,35 @@ abort hook Phase 5 uses.
 **Verify:** `pytest` + iso_test counts unchanged on docx/odt; tracemalloc extraction peak bounded.
 **Feasibility: ODS already uses this pattern — low risk.**
 
-## Phase 5 — Extracted-text cap enforced — `config.yaml`, `orchestrator/config.py`, `analyzer/extractor.py`, `orchestrator/policy_manager.py`, `manual_test/iso_test.py`
+## Phase 5 — Extracted-text cap enforced — ✅ DONE
+`config.yaml` + `orchestrator/config.py` + `analyzer/extractor.py` + `orchestrator/policy_manager.py` +
+`manual_test/iso_test.py` + `scripts/harness/test_failure_mode.py`.
+- **config.yaml:** new top-level `analyzer:` section with `max_extracted_chars: 16000000` (commented:
+  enforced DURING extraction because max_file_bytes can't bound a 14×-expanding docx body; `<=0` disables).
+- **config.py:** parses `analyzer.max_extracted_chars` (default 16_000_000) into a new
+  `OrchestratorConfig.max_extracted_chars` field.
+- **extractor.py:** `extract_text(path, max_chars=None)` and `extract_tabular(path, max_chars=None)` thread
+  the cap. The four zip-EXPANDING readers enforce it **mid-parse** (raise `ExtractionTooLarge` the instant
+  the running char_count crosses the cap, before the full body materializes): docx/odt (Phase 4),
+  **ods** (added: per repeat-expanded row) and **xlsx** (added: switched `list(iter_rows())` → a streaming
+  row loop so openpyxl aborts before the whole sheet is read). csv/pdf (bounded by max_file_bytes, no zip
+  expansion) get a post-hoc total via `_enforce_tabular_cap`; `extract_text` does a post-hoc `len()` check.
+- **policy_manager.analyze (file branch):** passes `max_chars` (cfg value, `<=0`→None), and
+  `except ExtractionTooLarge` → `verdict_for(channel)` logged `reason=text_cap` (the existing `finally`
+  still deletes the temp file).
+- **iso_test.py:** `--max-chars` (default None = full-parity regression gate); a capped file is recorded
+  as mode=`capped`, verdict block, a valid PASS (deny corpus), parity skipped.
+**Verify (all green):** cap=16M refuses docx/ods/odt/xlsx **b2 AND b3** mid-parse at ~16.00M chars
+(**correction to the original verify line: b2 ≈ 20–35M chars also exceeds 16M, so only the b1 set +
+csv/md/pdf/txt stay under** — confirmed by char-count probe). `pytest scripts/harness/ -q` =
+**140 passed, 3 skipped** (+2 `test_text_cap_follows_failure_mode` cases: fail_closed→BLOCK,
+fail_open→ALLOW). `iso_test` **no cap = ALL PASS 24/24** (full parity, no regression); **--max-chars
+16000000 = ALL PASS 24/24** (8 capped→block, 16 full-parity) and the cap also slashes time on the capped
+files (docx_b3 7.1 s→0.7 s, ods_b3 8.9 s→1.4 s). **Memory (mem_bench reader, ONE engine + 7 threads):
+7×docx_b3 (all abort at 16M) and 7×odt_b1 (all fully analyzed) both peak 1.07 GB** ⇒ ≤2 GB target met.
+Phase 7 next (client-side; needs VM); Phase 3/6 optional trims.
+
+## Phase 5 (original detail, retained) — `config.yaml`, `orchestrator/config.py`, `analyzer/extractor.py`, `orchestrator/policy_manager.py`, `manual_test/iso_test.py`
 **Depends on Phase 1 (failure_mode) + Phase 4 (abort hook).**
 **Goal:** bound per-analysis memory AND time by refusing to analyze text beyond the cap.
 **Steps**

@@ -23,6 +23,15 @@ limits:
   # peripheral_storage.transfer_agent below) — one setting covers oversize,
   # timeout, and analysis-error. The reason is still logged as reason=size_limit.
 
+analyzer:
+  # Cap on extracted text per file analysis (characters; ~2 bytes each in memory).
+  # Enforced DURING extraction (max_file_bytes caps FILE size, but a 6.6 MB docx
+  # expands ~14× to a 93 MB body, so a file-size cap alone cannot bound the body).
+  # Over it → extraction is refused and the channel's failure_mode verdict applies,
+  # logged reason=text_cap. ~16M chars ≈ a few hundred MB peak/analysis, which keeps
+  # the 7-worker worst case ≈ 1 GB on the 8 GB VM. Set <=0 to disable the cap.
+  max_extracted_chars: 16000000
+
 supervisor:                          # Consumed in Phase C; harmless to keep now.
   max_restarts: 3
   restart_window_seconds: 60

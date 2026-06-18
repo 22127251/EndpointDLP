@@ -73,6 +73,26 @@ def test_analysis_error_follows_failure_mode(make_orchestrator, fail_open, expec
         assert decision == expected, f"{channel}: expected {expected}, got {decision!r}"
 
 
+# ----------------------------- text cap ----------------------------------- #
+# A tiny analyzer.max_extracted_chars makes any real file's extracted text exceed
+# the cap, so policy_manager raises ExtractionTooLarge during extraction and maps
+# it to the channel's failure_mode (reason=text_cap). The temp file is deleted on
+# each request (policy_manager finally), so it is rewritten before each channel.
+
+@pytest.mark.parametrize("fail_open,expected", [(False, "BLOCK"), (True, "ALLOW")])
+def test_text_cap_follows_failure_mode(make_orchestrator, fail_open, expected):
+    overrides = {"analyzer": {"max_extracted_chars": 5}}
+    if fail_open:
+        overrides.update(_FAIL_OPEN)
+    orch = make_orchestrator(policies_fixture="permissive.yaml", config_overrides=overrides)
+    over_cap = orch.tmp_dir / "over_cap.txt"
+    content = "this text is well over the 5-char extracted cap"
+    for channel in _CHANNELS:
+        over_cap.write_text(content, encoding="utf-8")
+        decision = _send(orch, channel, kind="file", file_path=str(over_cap))
+        assert decision == expected, f"{channel}: expected {expected}, got {decision!r}"
+
+
 # ------------------------------ timeout ----------------------------------- #
 # DLP_TEST_SLOW_MS=5000 sleeps every analysis 5 s > the 4 s analysis budget, so
 # the dispatcher times out. Verdict must follow failure_mode (was hardcoded

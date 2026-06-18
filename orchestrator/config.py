@@ -53,6 +53,12 @@ class OrchestratorConfig:
     # transfer_agent.failure_mode (the component that owns the verdict). Use
     # verdict_for() rather than reading this dict directly.
     failure_mode: dict = field(default_factory=dict)
+    # Phase 5: cap on extracted text per file analysis (characters; ~2 bytes each
+    # in memory). Extraction is refused once the running count exceeds this
+    # (ExtractionTooLarge → verdict_for(channel), reason=text_cap), bounding
+    # per-analysis memory AND time. Sourced from analyzer.max_extracted_chars.
+    # ~16M chars ≈ a few hundred MB peak/analysis; <=0 disables the cap.
+    max_extracted_chars: int = 16_000_000
     # Phase AC-3 additions — the App Control (WDAC) channel. Sourced from the
     # app_control: section in config.yaml. Defaulted so pre-AC-3 fixtures that
     # build the dataclass directly (test_supervisor.py:_minimal_config) don't need
@@ -92,6 +98,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     paths = raw.get("paths", {})
     proxy = raw.get("proxy", {})
     service = raw.get("service", {})
+    analyzer = raw.get("analyzer", {}) or {}
     app_control = raw.get("app_control", {})
 
     # Unified per-channel failure_mode. Each channel reads it from its own section;
@@ -146,6 +153,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         drain_timeout_seconds=service.get("drain_timeout_seconds", 8),
         analysis_timeout_seconds=float(service.get("analysis_timeout_seconds", 4.0)),
         failure_mode=failure_mode,
+        max_extracted_chars=analyzer.get("max_extracted_chars", 16_000_000),
         app_control_enabled=app_control.get("enabled", True),
         app_control_inbox_dir=app_control.get("inbox_dir", ""),
         app_control_rejected_dir=app_control.get("rejected_dir", ""),
