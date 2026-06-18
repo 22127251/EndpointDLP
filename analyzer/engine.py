@@ -44,7 +44,6 @@ Notes
 from __future__ import annotations
 
 import bisect
-import re
 import time
 from dataclasses import dataclass, field
 from itertools import accumulate
@@ -60,14 +59,14 @@ if TYPE_CHECKING:
     from extractor import TabularData
 
 
-_WS_RE = re.compile(r"\s+")
-
-
 def normalize_ws(text: str) -> str:
-    """Collapse all whitespace runs to single spaces so PII wrapped across
-    line breaks during extraction still matches (mirrors verify.py). Idempotent,
-    so callers may normalize once and pass the result to analyze()."""
-    return _WS_RE.sub(" ", text)
+    """Collapse all whitespace runs (incl. newlines) to single spaces so PII
+    wrapped across line breaks during extraction still matches (mirrors
+    verify.py). Implemented with str.split()/join (no regex) so it stays cheap
+    when called as a per-unit normalizer (one cell / paragraph / line at a
+    time). Idempotent, so callers may normalize once and pass the result to
+    analyze() with normalize=False."""
+    return " ".join(text.split())
 
 
 # ---------------------------------------------------------------------------
@@ -201,10 +200,21 @@ class DLPEngine:
     # Public API — plain text
     # ------------------------------------------------------------------
 
-    def analyze(self, text: str, channel: str) -> AnalysisResult:
-        """Analyze plain text. Matches include start/end character positions."""
+    def analyze(self, text: str, channel: str, normalize: bool = True) -> AnalysisResult:
+        """Analyze plain text. Matches include start/end character positions.
+
+        When *normalize* is True the text is whitespace-normalized here; callers
+        that already normalized per unit (analyze_tabular's body path) pass
+        normalize=False to avoid a redundant second pass. Normalization is done
+        line-by-line — joining the per-line tokens with a single space — which is
+        identical to ``" ".join(text.split())`` (newlines are healed, so PII
+        wrapped across a line break still matches) but never materializes every
+        word of a multi-MB document at once, keeping the memory peak bounded."""
         t0 = time.perf_counter()
-        text = normalize_ws(text)
+        if normalize:
+            text = " ".join(
+                norm for line in text.split("\n") if (norm := normalize_ws(line))
+            )
 
         re2_hits, ac_hits, ac_starts = self._scan_text(text, channel)
         violations_map: dict[str, list[Match]] = {}
@@ -260,10 +270,15 @@ class DLPEngine:
         row_context: dict[str, dict[int, str]] = {}      # policy_id -> {row -> word} (any column)
 
         for col_idx, col in enumerate(cols):
-            joined = "\n".join(col.values)
+            # Normalize each cell (collapse internal whitespace incl. newlines) so
+            # PII wrapped inside a cell still matches. Per-cell normalization keeps
+            # the lengths used for row-offset recovery exact and never builds one
+            # giant token list for the whole column.
+            values = [normalize_ws(v) for v in col.values]
+            joined = "\n".join(values)
             joined_lower = joined.lower()
             # cell-start offsets: offsets[i] = start of cell i in `joined`
-            offsets = [0, *accumulate(len(v) + 1 for v in col.values)]
+            offsets = [0, *accumulate(len(v) + 1 for v in values)]
             hdr_lower = (col.header or "").lower()
 
             # header context (substring, case-insensitive) — store the policy's word
@@ -348,8 +363,13 @@ class DLPEngine:
         # scanned exactly once here; table columns were scanned above; the two
         # cover disjoint content (no double scan).
         if tabular.body:
-            body_text = "\n".join(tabular.body)
-            body_violations = self.analyze(body_text, channel).violations
+            # Normalize per paragraph (small units → bounded memory; a 93 MB
+            # body no longer triggers a whole-string normalize), then run the
+            # plain proximity engine with normalize=False. Paragraphs are joined
+            # by a single "\n", so cross-paragraph character proximity is
+            # unchanged (the boundary is still one character).
+            body_text = "\n".join(normalize_ws(p) for p in tabular.body)
+            body_violations = self.analyze(body_text, channel, normalize=False).violations
             violations = self._merge_violations(violations, body_violations)
 
         applied_action = _strongest_action(violations)

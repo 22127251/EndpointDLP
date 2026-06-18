@@ -1,9 +1,13 @@
 # Analyzer memory/perf hardening + unified per-channel failure handling
 
-**Status: PLAN — not yet implemented (Phase 0 is the only thing already done).**
+**Status: Phases 0, 1, 2 DONE. NEXT SESSION = Phase 4 then Phase 5** (the extracted-text cap, enforced
+during extraction — see the measured memory budget under "Pre-tested commands"; this is the lever that
+puts the 7-worker worst case at ~1.0 GB / ≤2 GB on the 8 GB VM). **Phase 3 (calamine) and Phase 6
+(single-pass) are deferred** — they only trim further and are NOT required for the 2 GB target.
 Separate from `analyzer-fix-and-test-plan.md` and `analyzer-body-context-fix-plan.md`.
 Each phase is **independently implementable, verifiable, and markable done**, so work can
-stop/resume across sessions. Execution order is the phase numbering below.
+stop/resume across sessions. (Original execution order was the phase numbering; reprioritized to 4→5
+next after the memory measurement showed the cap is the binding lever.)
 
 ---
 
@@ -123,7 +127,23 @@ oversize, error}, decision follows `failure_mode`; update `test_timeout.py`. `py
 **Done when:** every orchestrator-side failure honors the channel `failure_mode`; `reason=` still logged.
 **Feasibility: pure Python; reuses existing oversize machinery.**
 
-## Phase 2 — Memory-safe, fast normalization (per-unit) — `analyzer/engine.py`, `analyzer/extractor.py`
+## Phase 2 — Memory-safe, fast normalization (per-unit) — ✅ DONE
+`analyzer/engine.py` only (no `extractor.py` change needed — normalization lives in the engine).
+`normalize_ws` switched from `re.sub(\s+)` to `" ".join(text.split())` (dropped `import re`/`_WS_RE`);
+`analyze(text, channel, normalize=True)` gained the flag and now normalizes **per line** —
+`" ".join(norm for line in text.split("\n") if (norm := normalize_ws(line)))`. **Deviation from the
+original step 4:** joined the per-line tokens with a **space**, not `"\n"`. The literal
+`"\n".join(...)` would preserve embedded newlines and so stop healing PII wrapped across a line break
+(breaks `test_normalize_ws_heals_wrapped_pii` + changes counts); `" ".join` is byte-identical to
+`" ".join(text.split())` yet never materializes every word at once, so it keeps the memory win **and**
+identical counts. Table columns normalize **per cell** (local `values`, offsets recomputed from it);
+body normalizes **per paragraph** then calls `analyze(..., normalize=False)`.
+Verified: `pytest scripts/harness/ -q` = **138 passed, 3 skipped** (added
+`test_body_cross_paragraph_proximity`); `iso_test --corpus tmp/final-demo/deny` = **ALL PASS** (24/24,
+analyzer==oracle counts); **docx_b3 12.4 s→6.9 s, odt_b3→6.75 s** (back under the 10 s timeout);
+tracemalloc body-normalize peak **2.007 GB→0.376 GB** (< 0.5 GB). Phase 3 (calamine) next.
+
+## Phase 2 (original detail, retained) — `analyzer/engine.py`, `analyzer/extractor.py`
 **Goal:** never normalize a whole-document string; normalize each small unit. Kills the 1.5–1.7 GB
 spike (→ ~0.36 GB) and the time regression, keeps full normalization + identical counts.
 **Steps**
@@ -236,3 +256,22 @@ can't reach `failure_mode` without a larger refactor.**
   temp-cleanup quirk).
 - Corpus: `PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe manual_test/iso_test.py --corpus tmp/final-demo/deny --out tmp/<phase>_out`
   (always `--out` a temp dir so `manual_test/iso_test_out` reference output is preserved).
+- **Memory (the real constraint — use this, NOT tracemalloc): `manual_test/mem_bench.py`.**
+  Reports Windows **PeakWorkingSetSize** (matches Task Manager). `tracemalloc` only sees CPython-heap
+  allocs and is blind to re2's UTF-8 encode + `str.lower()` scan copies and lxml's C tree, so it
+  drastically under-reports (it said normalize=0.38 GB; real per-file RSS is ~1.1 GB). Commands:
+  per-file isolated `mem_bench.py --corpus tmp/final-demo/deny`; whole-corpus one process (mirrors
+  iso_test / Task Manager) `--single-process`; leak check `--file <f> --repeat 3` (flat `rss_trend`).
+  **Measured (post-Phase-2), per-file isolated:** docx_b3 1121 MB, odt_b3 1132 MB; single-process
+  whole-corpus peak 1.13 GB. But that naive "7 × per-file" overcounts.
+  **Production-shape concurrency (`--concurrent N --file X`: ONE shared engine, N threads — what the
+  orchestrator's 7-way pools actually do) is the real budget, and transients do NOT fully stack**
+  (extraction trees + per-column scan buffers free fast): **7×10M-char docx = 0.64 GB**, 5×10M = 0.53 GB,
+  **7×34.5M-char docx (uncapped) = 2.29 GB** (and 11.5 s → also times out). Linear in chars: 7 concurrent
+  stays ≤ 2 GB up to ~30M chars/file. **full peak (MB) ≈ 50 + ~12·(Mchars)** per file.
+  ⇒ **Answer to "can the agent worst case be ≤2 GB?": yes — with the extracted-text cap enforced
+  DURING extraction.** A 16M-char cap puts the 7-worker worst case at **~1.0 GB**; real endpoint files
+  (<5 MB text ≈ 5M chars) → 7 concurrent ≈ 0.4 GB. **The cap MUST fire while streaming (Phase 4), not
+  after**: `max_file_bytes`=100 MB lets a 6.6 MB docx→93M chars, so a 100 MB docx → ~1.4 BILLION-char
+  body → OOM in extraction before any post-hoc cap check. So **Phases 4 + 5 are the levers; Phase 3
+  (calamine) + Phase 6 (single-pass) only trim further and are not needed to hit 2 GB.**

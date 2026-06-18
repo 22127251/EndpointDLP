@@ -192,9 +192,24 @@ def test_document_merges_table_and_body(tmp_path):
     assert res.applied_action == "block"                  # strongest action wins
 
 
+def test_body_cross_paragraph_proximity(tmp_path):
+    eng = _engine(tmp_path, _SCORED)
+    # Per-paragraph normalization joins paragraphs with a single "\n", so a
+    # context word at the end of one paragraph stays within the visa
+    # context_range (40 chars) of a value at the start of the next → still
+    # boosted to block (proximity unchanged by the per-unit normalization).
+    td = TabularData(columns=[], body=["thẻ visa", "4111 1111 1111 1111"])
+    ms = _matches(eng.analyze_tabular(td, "browser"), "visa")
+    assert len(ms) == 1
+    assert ms[0].has_context is True
+    assert ms[0].context_word in {"thẻ", "visa"}
+    assert ms[0].action == "block"
+
+
 def test_normalize_ws_heals_wrapped_pii(tmp_path):
     eng = _engine(tmp_path, _SCORED)
-    # VISA split across a newline during extraction must still be detected.
+    # VISA split across a newline during extraction must still be detected: the
+    # plain path normalizes line-by-line but joins the tokens with a space.
     res = eng.analyze("thẻ visa 4111 1111\n1111 1111", "browser")
     assert len(_matches(res, "visa")) == 1
     assert normalize_ws("a \n b\t c") == "a b c"
