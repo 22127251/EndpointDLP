@@ -1,11 +1,11 @@
 # Analyzer memory/perf hardening + unified per-channel failure handling
 
-**Status: Phases 0, 1, 2, 4, 5 DONE. The ~2 GB / 8 GB-VM memory target is MET** — with the 16M-char
+**Status: Phases 0, 1, 2, 3, 4, 5 DONE. The ~2 GB / 8 GB-VM memory target is MET** — with the 16M-char
 cap enforced during extraction, the production-shape 7-worker worst case measures **1.07 GB** (mem_bench
-reader; both the all-capped 93 MB-body docx case and the under-cap odt_b1 case). **Phase 3 (calamine)
-and Phase 6 (single-pass) remain deferred** — they only trim further and are NOT required for the target.
+reader; both the all-capped 93 MB-body docx case and the under-cap odt_b1 case). **Phase 6 (single-pass)
+remains deferred** — it only trims further and is NOT required for the target.
 **Remaining: Phase 7** (C#/C++/addon client config polish + client pipe-fail honors `failure_mode`;
-needs the C# build + a clean-VM run — do last). Phase 3 may be picked up in a later session.
+needs the C# build + a clean-VM run — do last).
 Separate from `analyzer-fix-and-test-plan.md` and `analyzer-body-context-fix-plan.md`.
 Each phase is **independently implementable, verifiable, and markable done**, so work can
 stop/resume across sessions. (Original execution order was the phase numbering; reprioritized to 4→5
@@ -162,14 +162,40 @@ tmp/p2_out` ALL PASS; tracemalloc peak on docx_b3 < 0.5 GB.
 **Done when:** counts unchanged; docx_b3/odt_b3 ~5–8 s; normalize peak < 0.5 GB.
 **Feasibility: validated this session (per-unit = 0.36 GB, counts identical).**
 
-## Phase 3 — calamine xlsx/ods extraction (hard dep, no fallback) — `analyzer/requirements.txt`, `analyzer/extractor.py`
+## Phase 3 — calamine xlsx/ods extraction (hard dep, no fallback) — ✅ DONE
+`analyzer/requirements.txt` + `analyzer/extractor.py`. Added `python-calamine` (0.7.0, prebuilt cp313
+win_amd64 wheel) as a HARD dep. Replaced the openpyxl (xlsx) + lxml-iterparse (ods) tabular readers with
+one shared `_extract_calamine_tabular(path, max_chars)` (routing: `.xlsx`/`.ods` → it; the old
+`_extract_xlsx_tabular`/`_extract_ods_tabular` deleted) + a `_coerce_cell` helper, feeding the existing
+`_grid_to_columns`. **Deviation from the original step 2: used `CalamineSheet.iter_rows()` (row stream),
+NOT `to_python()`.** `to_python()` materializes the whole grid in Python at once, which would silently
+undo the Phase 5 mid-parse cap for ods/xlsx; `iter_rows()` pulls one row at a time so the running
+`char_count` can still raise `ExtractionTooLarge` before the full grid lands in Python. `_coerce_cell`
+keeps text cells as-is (leading zeros / `+84` preserved — calamine returns stored-text cells as `str`)
+and drops an integral float's `.0`; **no fallback** — the `from python_calamine import` raises loudly if
+the wheel is missing. (Caveat, documented: calamine parses the sheet mostly eagerly in `from_path`, so
+the cap bounds Python-side grid growth, not calamine's internal Rust parse time — fine, the synthetic
+100 MB-xlsx worst case then fails closed via the orchestrator analysis timeout, and the 2 GB target was
+already met by Phases 4+5.)
+Verified: extraction output **byte-identical** (sha256 over cols/headers/values on ods_b1–b3 + xlsx_b1–b3
+— `tmp/p3_fingerprint.py`, only timing differs); `pytest scripts/harness/ -q` = **140 passed, 3 skipped**
+(unchanged); `iso_test --corpus tmp/final-demo/deny` **no cap = ALL PASS 24/24** (ods_b3/xlsx_b3 == oracle
+80/80/80 — number-coercion / leading-zero parity holds) and **--max-chars 16000000 = ALL PASS 24/24**
+(ods/xlsx b2+b3 abort mid-parse at ~16.00M chars → block; b1 full parity). **Extraction time (uncapped):
+ods 3.0 s→0.76 s (b3), 1.1 s→0.28 s (b2), 0.33 s→0.08 s (b1); xlsx 3.1 s→2.98 s (b3), 1.0 s→0.76 s (b2),
+0.51 s→0.22 s (b1)** — every realistic/under-cap file is now well under 1 s; the over-cap b3 synthetics
+match the plan's own expected ~3–4 s (and are capped in production). **Extract-only peak RSS (uncapped):
+ods_b3 433 MB, xlsx_b3 304 MB** (≤ the lxml docx/odt streamers' 349–351 MB), under-cap b1 64–80 MB — no
+memory regression. Phase 6 (single-pass) optional; Phase 7 (client-side, needs VM) remains.
+
+## Phase 3 (original detail, retained) — `analyzer/requirements.txt`, `analyzer/extractor.py`
 **Goal:** cut ods/xlsx extraction ~5 s → <1 s and shrink its memory.
 **Steps**
 1. Add `python-calamine` to `requirements.txt` (prebuilt cp313 win_amd64 wheel).
 2. Rewrite `_extract_xlsx_tabular` + `_extract_ods_tabular` on calamine
    (`CalamineWorkbook.from_path(...).get_sheet_by_index(i).to_python()` → grid → `_grid_to_columns`),
    `str(...)`-coercing every cell (preserve leading zeros / `+84`). **No lxml fallback** — if calamine
-   import fails, fail loudly.
+   import fails, fail loudly. *(Implemented with `iter_rows()` instead of `to_python()` — see DONE note.)*
 **Verify:** `pytest` green; **gate on parity** — iso_test must still read 80/80/80 for ods_b3/xlsx_b3
 (catches number-coercion / leading-zero loss); extraction <1 s.
 **Done when:** counts identical AND ods/xlsx extraction <1 s. **Feasibility: wheel + speed confirmed;

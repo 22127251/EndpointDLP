@@ -214,10 +214,8 @@ def extract_tabular(file_path: str | Path, max_chars: int | None = None) -> Tabu
         td = _extract_csv_tabular(path, delimiter=",")
     elif suffix == ".tsv":
         td = _extract_csv_tabular(path, delimiter="\t")
-    elif suffix == ".xlsx":
-        return _extract_xlsx_tabular(path, max_chars)
-    elif suffix == ".ods":
-        return _extract_ods_tabular(path, max_chars)
+    elif suffix in (".xlsx", ".ods"):
+        return _extract_calamine_tabular(path, max_chars)
     elif suffix == ".docx":
         return _extract_docx_tabular(path, max_chars)
     elif suffix == ".odt":
@@ -275,42 +273,58 @@ def _extract_csv_tabular(path: Path, delimiter: str = ",") -> TabularData:
     return TabularData(columns=columns)
 
 
-# ---- Excel (.xlsx) ----
+# ---- Excel (.xlsx) + ODS (.ods) — python-calamine (Rust) ----
 
-def _extract_xlsx_tabular(path: Path, max_chars: int | None = None) -> TabularData:
-    import openpyxl
+def _coerce_cell(v) -> str:
+    """Coerce a python-calamine cell value to text.
 
-    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    Text cells come back as ``str`` (so leading zeros and ``+84`` prefixes are
+    preserved verbatim); numbers/dates are stringified. An *integral* float drops
+    its ``.0`` so a number-typed ID cell becomes ``"12345"`` not ``"12345.0"``.
+    ``bool`` is handled before the float/int branches (it is an ``int`` subclass).
+    Empty cells are calamine's own ``""`` and pass straight through."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _extract_calamine_tabular(path: Path, max_chars: int | None = None) -> TabularData:
+    """Extract column-structured data from .xlsx / .ods with python-calamine (Rust).
+
+    Replaces the openpyxl (xlsx) and lxml-iterparse (ods) readers — calamine
+    parses both formats several times faster (corpus: ~3 s → <1 s) and at lower
+    memory. Rows are pulled one at a time via ``CalamineSheet.iter_rows`` so the
+    running character count can raise ExtractionTooLarge *mid-parse*, before the
+    whole grid is materialized in Python, keeping the Phase 5 cap that
+    ``to_python()`` (a whole-grid materializer) could not. Each cell is coerced
+    to text by ``_coerce_cell``; the row-major grid is handed to the shared
+    ``_grid_to_columns`` (same header / numeric-header-fallback logic as before).
+
+    Hard dependency, **no fallback**: if python-calamine is not importable the
+    import below raises and extraction fails loudly, so it is never ambiguous
+    which reader ran (decision #3 in the perf/failmode plan)."""
+    from python_calamine import CalamineWorkbook
+
     columns: list[ColumnBlock] = []
     char_count = 0
-
-    for sheet in wb.worksheets:
-        # Stream rows (openpyxl read_only yields lazily) and accumulate the char
-        # count so the cap aborts before the whole — possibly huge — sheet is
-        # materialized, rather than after.
-        rows = []
-        for row in sheet.iter_rows(values_only=True):
-            rows.append(row)
-            char_count += sum(len(str(c)) for c in row if c is not None)
-            if max_chars is not None and char_count > max_chars:
-                raise ExtractionTooLarge(char_count)
-        if not rows:
-            continue
-
-        raw_headers = [str(h) if h is not None else "" for h in rows[0]]
-        data_rows = rows[1:]
-
-        non_empty = [h for h in raw_headers if h.strip()]
-        if non_empty and all(_is_numeric_string(h) for h in non_empty):
-            raw_headers = [f"Column {i + 1}" for i in range(len(raw_headers))]
-            data_rows = rows
-
-        for col_idx, header in enumerate(raw_headers):
-            values = [
-                str(row[col_idx]) if col_idx < len(row) and row[col_idx] is not None else ""
-                for row in data_rows
-            ]
-            columns.append(ColumnBlock(header=header.strip(), values=values, sheet=sheet.title))
+    wb = CalamineWorkbook.from_path(str(path))
+    try:
+        for idx in range(len(wb.sheet_names)):
+            sheet = wb.get_sheet_by_index(idx)
+            grid: list[list[str]] = []
+            for row in sheet.iter_rows():
+                cells = [_coerce_cell(c) for c in row]
+                grid.append(cells)
+                char_count += sum(len(c) for c in cells)
+                if max_chars is not None and char_count > max_chars:
+                    raise ExtractionTooLarge(char_count)
+            _grid_to_columns(grid, sheet.name, columns)
+    finally:
+        wb.close()
 
     return TabularData(columns=columns)
 
@@ -336,69 +350,6 @@ def _grid_to_columns(grid: list[list[str]], sheet: str | None,
         header = headers[ci].strip() if ci < len(headers) else ""
         values = [(r[ci] if ci < len(r) else "") for r in data_rows]
         columns.append(ColumnBlock(header=header, values=values, sheet=sheet))
-
-
-# ---- ODS (OpenDocument Spreadsheet) — fast lxml streaming ----
-
-def _extract_ods_tabular(path: Path, max_chars: int | None = None) -> TabularData:
-    """Stream content.xml with lxml.iterparse (C parser, row-by-row memory
-    release) instead of building the full odfpy DOM — ~16.5 s → ~3.6 s on the
-    8 MB corpus while preserving column/header structure. A running character
-    count over the (repeat-expanded) cell text raises ExtractionTooLarge mid-parse
-    when *max_chars* is exceeded."""
-    from lxml import etree
-
-    T = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
-    CELL_TAGS = (T + "table-cell", T + "covered-table-cell")
-
-    with zipfile.ZipFile(path) as z:
-        data = z.read("content.xml")
-
-    columns: list[ColumnBlock] = []
-    cur_sheet = ""
-    grid: list[list[str]] = []
-    char_count = 0
-
-    for event, el in etree.iterparse(io.BytesIO(data), events=("start", "end")):
-        if event == "start":
-            if el.tag == T + "table":
-                cur_sheet = el.get(T + "name") or ""
-                grid = []
-            continue
-
-        if el.tag == T + "table-row":
-            cells: list[str] = []
-            for cell in el:
-                if cell.tag not in CELL_TAGS:
-                    continue
-                try:
-                    rep = int(cell.get(T + "number-columns-repeated", "1") or 1)
-                except ValueError:
-                    rep = 1
-                txt = "".join(cell.itertext()).strip()
-                # Empty cells often carry huge repeat counts (trailing padding) —
-                # collapse them so we don't materialize thousands of "" entries.
-                rep = 1 if not txt else min(rep, 4096)
-                cells.extend([txt] * rep)
-            while cells and not cells[-1]:
-                cells.pop()
-            if cells:
-                try:
-                    rrep = min(int(el.get(T + "number-rows-repeated", "1") or 1), 4096)
-                except ValueError:
-                    rrep = 1
-                for _ in range(rrep):
-                    grid.append(list(cells))
-                char_count += sum(len(c) for c in cells) * rrep
-                if max_chars is not None and char_count > max_chars:
-                    raise ExtractionTooLarge(char_count)
-            el.clear()
-        elif el.tag == T + "table":
-            _grid_to_columns(grid, cur_sheet, columns)
-            grid = []
-            el.clear()
-
-    return TabularData(columns=columns)
 
 
 # ---- DOCX (Word document — tables + body paragraphs) — fast lxml ----
