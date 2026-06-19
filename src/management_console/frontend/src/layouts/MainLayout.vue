@@ -61,7 +61,7 @@
             <el-icon><Setting /></el-icon>
             <span>Settings</span>
           </el-menu-item>
-          <el-menu-item @click="handleLogout">
+          <el-menu-item @click="handleLogout" index="logout">
             <el-icon><SwitchButton /></el-icon>
             <span>Logout</span>
           </el-menu-item>
