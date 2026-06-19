@@ -143,6 +143,7 @@ def run_core(
     in_use_data_pipe = config.data_pipe
     in_use_ctl_pipe = config.ctl_pipe
     in_use_admin_pipe = config.admin_pipe
+    in_use_server_section = config.raw.get("server", {}).copy()
 
     ctl_server = CtlServer(config, raw_provider=lambda: raw_cell["raw"])
 
@@ -173,10 +174,19 @@ def run_core(
                 "admin_pipe change requires restart; keeping %r (yaml wanted %r)",
                 in_use_admin_pipe, new_admin_pipe,
             )
+        new_server = new_raw.get("server", {})
+        if new_server.get("agent_id") != in_use_server_section.get("agent_id"):
+            log.warning(
+                "server.agent_id change requires restart; keeping %r",
+                in_use_server_section.get("agent_id"),
+            )
         # Override the unchangeable fields back to in-use values so subscribers
         # see an internally-consistent snapshot. Other field changes pass through.
         new_raw = {**new_raw, "data_pipe": in_use_data_pipe,
-                   "ctl_pipe": in_use_ctl_pipe, "admin_pipe": in_use_admin_pipe}
+                   "ctl_pipe": in_use_ctl_pipe, "admin_pipe": in_use_admin_pipe,
+                   "server": {**new_server, "agent_id": in_use_server_section.get("agent_id", ""),
+                              "url": in_use_server_section.get("url", ""),
+                              "enabled": in_use_server_section.get("enabled", False)}}
         raw_cell["raw"] = new_raw
         config_state["reloaded_wall"] = time.time()
         ctl_server.broadcast()
@@ -220,6 +230,14 @@ def run_core(
         )
     else:
         log.info("DLP_SUPERVISOR_DISABLED set; skipping child supervisor.")
+
+    # ── Cloud bridge: management console connectivity ──
+    cloud_bridge = None
+    if config.server_enabled and config.server_url:
+        from orchestrator.cloud_bridge import CloudBridge
+        cloud_bridge = CloudBridge(config)
+        dispatcher.set_violation_callback(cloud_bridge.report_violation)
+        cloud_bridge.start()
 
     if ready_callback is not None:
         # Hand the live supervisor to the service so SvcOtherEx can drive
@@ -282,6 +300,9 @@ def run_core(
         log.info("Ctrl+C received, shutting down...")
         stop_event.set()
     finally:
+        # Stop cloud bridge first (stop heartbeat before shutting down pipes)
+        if cloud_bridge is not None:
+            cloud_bridge.stop()
         # Stop children FIRST so Controller releases the alive mutex (hooks
         # deactivate) while the orchestrator's pipes are still up. (Proxy is
         # restored inside supervisor.stop_all()/stop_session().)

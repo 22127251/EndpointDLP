@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from typing import Any
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.events import record_decision
@@ -42,6 +43,9 @@ class Dispatcher:
         self._active: set[Future] = set()
         self._active_lock = threading.Lock()
         self._inflight_counts: dict[str, int] = {ch: 0 for ch in _CHANNELS}
+
+        # Cloud bridge: optional violation callback (set after CloudBridge init)
+        self._violation_callback: Any = None
 
     def analyze(self, request: dict) -> tuple[str, bool, str]:
         """
@@ -118,6 +122,10 @@ class Dispatcher:
         future.add_done_callback(_done)
         return future
 
+    def set_violation_callback(self, callback: Any) -> None:
+        """Set callback invoked with violation dicts when BLOCK decisions occur."""
+        self._violation_callback = callback
+
     def _emit_event(
         self, request: dict, channel: str, decision: str, violations: list,
         elapsed_ms: float, req_id: str, *, superseded: bool,
@@ -143,6 +151,29 @@ class Dispatcher:
             )
         except Exception as exc:  # noqa: BLE001 — audit logging must never break a decision
             log.warning("event log failed for req=%s: %s", req_id, exc)
+
+        # Cloud bridge: report violations to management console (non-blocking)
+        if violations and self._violation_callback is not None:
+            try:
+                self._violation_callback({
+                    "agent_id": "",  # filled by CloudBridge
+                    "channel": channel,
+                    "action": "block",
+                    "details": {
+                        "req_id": req_id,
+                        "file_path": request.get("file_path", ""),
+                        "filename": name or "",
+                        "url": url or "",
+                        "elapsed_ms": round(elapsed_ms, 1),
+                        "violations": [
+                            {"policy_id": getattr(v, "policy_id", "?"),
+                             "count": len(getattr(v, "matches", []) or [])}
+                            for v in violations
+                        ],
+                    },
+                })
+            except Exception:
+                log.debug("violation callback failed", exc_info=True)
 
     def _analyze_browser(self, request: dict) -> tuple[str, str, list]:
         req_id = request.get("req_id", "?")

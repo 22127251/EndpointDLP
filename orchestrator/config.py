@@ -42,6 +42,14 @@ class OrchestratorConfig:
     # don't need to enumerate them.
     admin_pipe: str = "\\\\.\\pipe\\dlp_agent_admin"
     drain_timeout_seconds: int = 8
+    # Cloud bridge: management console connection. server_url="" + agent_id=""
+    # means standalone mode (no cloud connectivity). These are NOT hot-reloadable
+    # because agent_id changes mid-flight would break heartbeat identity.
+    server_url: str = ""
+    server_agent_id: str = ""
+    server_heartbeat_interval: int = 30
+    server_log_sync_interval: int = 300
+    server_enabled: bool = False
     # Whole parsed yaml. Only the ctl-pipe broadcaster reads this — every other
     # orchestrator module reads the flat fields above. Keeping the raw tree lets
     # us project per-component sections (clipboard / browser / peripheral_storage)
@@ -61,6 +69,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     paths = raw.get("paths", {})
     proxy = raw.get("proxy", {})
     service = raw.get("service", {})
+    server = raw.get("server", {})
 
     return OrchestratorConfig(
         data_pipe=raw["data_pipe"],
@@ -99,5 +108,10 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         ),
         admin_pipe=raw.get("admin_pipe", "\\\\.\\pipe\\dlp_agent_admin"),
         drain_timeout_seconds=service.get("drain_timeout_seconds", 8),
+        server_url=server.get("url", ""),
+        server_agent_id=server.get("agent_id", ""),
+        server_heartbeat_interval=server.get("heartbeat_interval", 30),
+        server_log_sync_interval=server.get("log_sync_interval", 300),
+        server_enabled=server.get("enabled", False),
         raw=raw,
     )

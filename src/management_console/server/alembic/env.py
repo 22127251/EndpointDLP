@@ -11,6 +11,7 @@ from alembic import context
 from app.database import Base
 from app.models.agent import Agent
 from app.models.agent_group import AgentGroup
+from app.models.agent_log import AgentLog
 from app.models.audit_log import AuditLog
 from app.models.policy import Policy
 from app.models.policy_assignment import policy_group_assignments, policy_agent_assignments
