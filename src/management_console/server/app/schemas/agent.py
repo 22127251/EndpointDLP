@@ -10,7 +10,6 @@ class AgentUpdate(BaseModel):
     group_id: UUID | None = None
     description: str | None = None
 class AgentCreate(BaseModel):
-    id: UUID
     hostname: str
     status: AgentStatus
     description: str | None = None

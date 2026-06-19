@@ -7,6 +7,9 @@
           Monitor status and organize machines into security groups.
         </p>
       </div>
+      <el-button type="primary" :icon="Plus" @click="openRegisterDialog"
+        >Create New Agent</el-button
+      >
     </div>
 
     <div class="header-actions">
@@ -42,6 +45,7 @@
             <div class="agent-info">
               <div>
                 <div class="hostname">{{ row.hostname || "Unregistered" }}</div>
+                <div class="uuid">{{ row.id }}</div>
               </div>
             </div>
           </template>
@@ -263,6 +267,11 @@ const fetchData = async () => {
     agents.value = aRes.data.items || aRes.data;
     groups.value = gRes.data.items || gRes.data;
     total.value = aRes.data.total || 0;
+  } catch (error) {
+    console.error("Fetch error:", error);
+    agents.value = [];
+    groups.value = [];
+    ElMessage.error("Failed to load data from server");
   } finally {
     loading.value = false;
   }

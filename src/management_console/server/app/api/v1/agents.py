@@ -10,7 +10,7 @@ from app.models.agent import Agent, AgentStatus
 from app.models.user import User
 from app.schemas.agent import AgentResponse, AgentCreate, AgentUpdate
 from app.models.agent_group import AgentGroup
-from app.api.deps import get_current_user, verify_agent_token
+from app.api.deps import get_current_user, is_admin_user
 from app.services.policy_service import get_combined_policies_for_agent
 from fastapi.encoders import jsonable_encoder
 from app.services.audit_log_service import add_audit_log
@@ -103,7 +103,6 @@ async def get_agent_config(
     agent_id: UUID,
     format: str = Query("json", enum=["json", "yaml"]),
     db: AsyncSession = Depends(get_db),
-    agent_key: str = Depends(verify_agent_token)
 ):
     result = await db.execute(
         select(Agent)
@@ -166,17 +165,21 @@ async def get_agent_config(
 async def register_agent(
     agent_data: AgentCreate,
     db: AsyncSession = Depends(get_db),
-    agent_key: str = Depends(verify_agent_token)
+    is_admin: User = Depends(is_admin_user)
 ):
-    data = agent_data.model_dump(mode="json")
+    new_agent = await db.execute(select(Agent).where(Agent.hostname == agent_data.hostname))
+    existing_agent = new_agent.scalar_one_or_none()
+    if existing_agent:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Agent with this hostname already exists")
+
     
-    agent = Agent(**data)
+    agent = Agent(**agent_data.model_dump())
     db.add(agent)
     
     # audit log
     await add_audit_log(
         db=db,
-        user_id="agent",
+        user_id=None,
         username=f"agent_{agent.hostname}",
         action="register",
         target_type="agent",
@@ -195,7 +198,6 @@ async def agent_heartbeat(
     agent_id: UUID,
     format: str = Query("json", enum=["json", "yaml"]),
     db: AsyncSession = Depends(get_db),
-    agent_key: str = Depends(verify_agent_token)
 ):
     result = await db.execute(
         select(Agent)

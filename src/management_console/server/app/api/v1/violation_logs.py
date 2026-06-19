@@ -6,7 +6,7 @@ from app.models.violation_log import ViolationLog
 from app.models.agent import Agent
 from app.models.policy import Policy
 from app.schemas.violation_log import ViolationLogCreate
-from app.api.deps import verify_agent_token, get_current_user
+from app.api.deps import get_current_user
 from app.models.user import User
 
 
@@ -51,7 +51,6 @@ async def list_logs(
 async def create_violation_log(
     data: ViolationLogCreate,
     db: AsyncSession = Depends(get_db),
-    agent_key: str = Depends(verify_agent_token)
 ):
     agent = await db.get(Agent, data.agent_id)
     policy = await db.get(Policy, data.policy_id)

@@ -9,17 +9,6 @@ from app.config import get_settings
 
 security = HTTPBearer()
 
-async def verify_agent_token(
-        x_agent_key: str = Header(...)):
-    setting = get_settings()
-    if x_agent_key != setting.AGENT_SECRET_KEY: 
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid agent"
-        )
-    return x_agent_key
-
-
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db)
