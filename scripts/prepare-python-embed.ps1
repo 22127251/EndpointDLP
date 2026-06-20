@@ -67,7 +67,7 @@ function Get-FileWithRetry {
            "download it in a browser to '$OutFile' and re-run this script (it reuses an existing file).")
 }
 
-Write-Host "Phase D Python embeddable prep — version $PythonVersion" -ForegroundColor Cyan
+Write-Host "Phase D Python embeddable prep - version $PythonVersion" -ForegroundColor Cyan
 Write-Host "  RepoRoot:  $RepoRoot"
 Write-Host "  EmbedDir:  $EmbedDir"
 
@@ -87,7 +87,7 @@ Expand-Archive -Path $EmbedZip -DestinationPath $EmbedDir -Force
 # what blocks pip + arbitrary site-packages until we flip it on.
 $PthFile = Get-ChildItem -Path $EmbedDir -Filter "python*._pth" | Select-Object -First 1
 if (-not $PthFile) {
-    throw "Could not find python*._pth in $EmbedDir — embeddable layout changed?"
+    throw "Could not find python*._pth in $EmbedDir - embeddable layout changed?"
 }
 Write-Host "Patching $($PthFile.Name): enabling import site + Lib\site-packages"
 $pth = Get-Content -Path $PthFile.FullName -Raw
