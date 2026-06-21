@@ -14,6 +14,7 @@ async def get_combined_policies_for_agent(db: AsyncSession, agent_id: str):
         .options(
             selectinload(Agent.group),
             selectinload(Agent.group).selectinload(AgentGroup.policies),
+            selectinload(Agent.policies),
         )
     )
     agent = agent_result.scalar_one_or_none()

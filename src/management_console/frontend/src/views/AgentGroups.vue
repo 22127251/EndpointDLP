@@ -310,8 +310,10 @@ const removePolicyFromGroup = async (policyId) => {
   ElMessageBox.confirm("Remove this policy from the group?").then(async () => {
     try {
       const res = await apiClient.get(`/policies/${policyId}`);
+      const policy = res.data;
 
-      const updatedGroups = currentGroups.filter((id) => id !== form.value.id);
+      const currentGroupIds = (policy.agent_groups || []).map((g) => g.id);
+      const updatedGroups = currentGroupIds.filter((id) => id !== form.value.id);
 
       await apiClient.post(
         `/policies/${policyId}/assign-groups`,
@@ -327,7 +329,7 @@ const removePolicyFromGroup = async (policyId) => {
 };
 
 const refreshCurrentGroupData = async () => {
-  const res = await apiClient.get("/agent-groups/");
+  const res = await apiClient.get("/agent-groups/", { params: { page: 1, page_size: 100 } });
   groups.value = res.data.items || res.data;
   const updated = groups.value.find((g) => g.id === form.value.id);
   if (updated) {
@@ -410,7 +412,7 @@ onMounted(fetchData);
 const getActionType = (action) => {
   const map = {
     block: "danger",
-    alert: "warning",
+    allow_log: "warning",
     allow: "success",
   };
   return map[action?.toLowerCase()] || "info";

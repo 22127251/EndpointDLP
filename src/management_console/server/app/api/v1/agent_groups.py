@@ -25,7 +25,7 @@ async def list_agent_groups(
 ):
     query = (
         select(AgentGroup)
-        .options(selectinload(AgentGroup.agents))
+        .options(selectinload(AgentGroup.agents), selectinload(AgentGroup.policies))
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -53,6 +53,46 @@ async def list_agent_groups(
         "page_size": page_size,
         "total": total
     }
+
+
+@router.put("/{group_id}", response_model=AgentGroupResponse)
+async def update_agent_group(
+    group_id: UUID,
+    data: AgentGroupCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    group = await db.get(AgentGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group does not exist")
+
+    group.name = data.name
+    group.description = data.description
+
+    await add_audit_log(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="update_agent_group",
+        target_type="agent_group",
+        target_id=str(group_id),
+        description=f"Updated agent group '{group.name}'"
+    )
+
+    await db.commit()
+    await db.refresh(group)
+    result = await db.execute(
+        select(AgentGroup)
+        .options(selectinload(AgentGroup.agents))
+        .where(AgentGroup.id == group_id)
+    )
+    group_with_agents = result.scalar_one()
+    return AgentGroupResponse(
+        id=group.id, name=group.name,
+        description=group.description,
+        member_count=len(group_with_agents.agents),
+        agents=[AgentResponse.model_validate(a) for a in group_with_agents.agents],
+    )
 
 
 @router.post("/", response_model=AgentGroupResponse, status_code=201)

@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 from app.database import get_db
 from app.models.policy import Policy
 from app.models.user import User
-from app.schemas.policy import PolicyCreate, PolicyUpdate, PolicyResponse
+from app.schemas.policy import PolicyCreate, PolicyUpdate, PolicyResponse, PolicyDetailResponse
 from app.api.deps import get_current_user
 from app.models.agent import Agent
 from app.models.agent_group import AgentGroup
@@ -25,7 +25,13 @@ async def list_policies(
 ):
     
     
-    query = select(Policy)
+    query = (
+        select(Policy)
+        .options(
+            selectinload(Policy.individual_agents),
+            selectinload(Policy.agent_groups),
+        )
+    )
 
     total_query = select(func.count(Policy.id))
     if search:
@@ -74,16 +80,24 @@ async def create_policy(
     return PolicyResponse.model_validate(policy)
 
 
-@router.get("/{policy_id}", response_model=PolicyResponse)
+@router.get("/{policy_id}", response_model=PolicyDetailResponse)
 async def get_policy(
     policy_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    policy = await db.get(Policy, policy_id)
+    result = await db.execute(
+        select(Policy)
+        .where(Policy.id == policy_id)
+        .options(
+            selectinload(Policy.individual_agents),
+            selectinload(Policy.agent_groups),
+        )
+    )
+    policy = result.scalar_one_or_none()
     if not policy:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy not found")
-    return PolicyResponse.model_validate(policy)
+    return PolicyDetailResponse.model_validate(policy)
 
 
 @router.put("/{policy_id}", response_model=PolicyResponse)

@@ -30,7 +30,8 @@ async def list_agents(
         select(Agent)
         .options(
             selectinload(Agent.group),
-            selectinload(Agent.group).selectinload(AgentGroup.policies)
+            selectinload(Agent.group).selectinload(AgentGroup.policies),
+            selectinload(Agent.policies),
         )
     )
 
@@ -47,29 +48,23 @@ async def list_agents(
     query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
-    agents = result.scalars().all()
+    agents = result.scalars().unique().all()
 
     items = []
     for agent in agents:
         policy_map = {}
-
-        if agent.group_id and agent.group.policies:
+        if agent.group_id and agent.group and agent.group.policies:
             for p in agent.group.policies:
                 if p.is_active:
                     policy_map[p.id] = p
-
-        if agent.policies:
-            for p in agent.policies:
-                if p.is_active:
-                    policy_map[p.id] = p
-
-        policies = await get_combined_policies_for_agent(db, str(agent.id))
-        agent.policies = policies
+        for p in (agent.policies or []):
+            if p.is_active:
+                policy_map[p.id] = p
+        agent.policies = list(policy_map.values())
         items.append(AgentResponse.model_validate(agent))
 
-
     return { 
-        "items": [AgentResponse.model_validate(a) for a in agents],
+        "items": items,
         "page": page,
         "page_size": page_size,
         "total": total_agent

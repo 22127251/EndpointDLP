@@ -1,13 +1,12 @@
 from pydantic import BaseModel, Field
 from uuid import UUID
 from datetime import datetime
-from app.schemas.policy import PolicyAction, PolicyChannel
 
 class ViolationLogCreate(BaseModel):
     agent_id: UUID
     policy_id: UUID
-    channel: PolicyChannel
-    action: PolicyAction
+    channel: str = "all"
+    action: str = "block"
     details: dict = Field(
         ...,
         min_length=1,
@@ -22,8 +21,8 @@ class ViolationLogResponse(ViolationLogCreate):
     id: UUID
     agent_id: UUID
     policy_id: UUID
-    channel: PolicyChannel
-    action: PolicyAction
+    channel: str
+    action: str
     details: dict
     created_at: datetime
     model_config = {"from_attributes": True}

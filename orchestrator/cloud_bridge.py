@@ -30,53 +30,34 @@ from orchestrator.config import OrchestratorConfig
 
 log = logging.getLogger(__name__)
 
-# Channel mapping: server channel → local channel list
-_CHANNEL_MAP: dict[str, list[str]] = {
-    "all": ["browser", "clipboard", "peripheral_storage"],
-    "browser": ["browser"],
-    "clipboard": ["clipboard"],
-    "usb": ["peripheral_storage"],
-    "email": [],  # not yet supported
-}
-
-
-def _map_channel(server_channel: str) -> list[str]:
-    return _CHANNEL_MAP.get(server_channel, [])
-
-
-def _map_action(server_action: str) -> str:
-    """Server 'alert' → local 'allow_log'."""
-    return "allow_log" if server_action == "alert" else server_action
-
-
-def _map_rule_type(server_rule_type: str) -> str:
-    """Server 'keyword' → local 'denylist'."""
-    return "denylist" if server_rule_type == "keyword" else server_rule_type
-
 
 def translate_policies(server_policies: list[dict]) -> dict:
-    """Convert server policy format to local analyzer/policies.yaml format."""
+    """Convert server policy format to local analyzer/policies.yaml format.
+
+    Server now uses the same fields as local policies.yaml:
+    - type, patterns, keywords, channels, action, context_words, context_range
+    So translation is mostly a pass-through with minor cleanup.
+    """
     local_policies = []
     for p in server_policies:
         if not p.get("is_active", True):
             continue
-        rule = p.get("rule", {})
-        rule_type = _map_rule_type(p.get("rule_type", "regex"))
         local: dict[str, Any] = {
             "id": str(p["id"]),
             "name": p.get("name", ""),
-            "channels": _map_channel(p.get("channel", "all")),
-            "action": _map_action(p.get("action", "allow")),
-            "type": rule_type,
+            "channels": p.get("channels", []),
+            "action": p.get("action", "allow"),
+            "type": p.get("type", "regex"),
         }
+        # Pass through patterns/keywords based on rule type
+        rule_type = local["type"]
         if rule_type == "regex":
-            pattern = rule.get("pattern", "")
-            local["patterns"] = [pattern] if pattern else []
-        elif rule_type == "denylist":
-            local["keywords"] = rule.get("keywords", [])
-        # context_words / context_range: use server values if present, else defaults
-        local["context_words"] = rule.get("context_words", [])
-        local["context_range"] = rule.get("context_range", 0)
+            local["patterns"] = p.get("patterns", [])
+        elif rule_type in ("denylist", "keyword"):
+            local["keywords"] = p.get("keywords", [])
+        # Context matching
+        local["context_words"] = p.get("context_words", [])
+        local["context_range"] = p.get("context_range", 0)
         local_policies.append(local)
     return {"policies": local_policies}
 

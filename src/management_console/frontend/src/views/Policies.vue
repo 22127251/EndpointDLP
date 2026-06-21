@@ -42,11 +42,20 @@
       <!-- POLICY TABLE -->
       <el-table :data="policies" v-loading="loading">
         <el-table-column prop="name" label="POLICY NAME" min-width="220" />
-        <el-table-column label="CHANNEL" width="120">
+        <el-table-column label="CHANNELS" min-width="180">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain">{{
-              row.channel.toUpperCase()
-            }}</el-tag>
+            <el-tag
+              v-for="ch in (row.channels || [])"
+              :key="ch"
+              size="small"
+              effect="plain"
+              class="channel-tag"
+            >{{ ch.toUpperCase() }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="TYPE" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ row.type?.toUpperCase() }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="ACTION" width="120">
@@ -64,7 +73,7 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="MANAGE" width="150" align="right">
+        <el-table-column label="MANAGE" width="200" align="right">
           <template #default="{ row }">
             <el-dropdown
               @command="(format) => exportData(row, `policy_${row.id}`, format)"
@@ -80,6 +89,9 @@
 
             <el-button link :icon="Edit" @click="handleOpenDialog(row)"
               >Edit</el-button
+            >
+            <el-button link @click="handleOpenAssign(row)"
+              >Assign</el-button
             >
             <el-button
               link
@@ -109,7 +121,7 @@
     <el-dialog
       v-model="dialogVisible"
       :title="isEdit ? 'Edit Policy' : 'Create New Policy'"
-      width="650px"
+      width="700px"
     >
       <el-form :model="form" label-position="top">
         <el-form-item label="Policy Name" required>
@@ -118,13 +130,13 @@
 
         <el-row :gutter="20">
           <el-col :span="12">
-            <el-form-item label="Channel">
-              <el-select v-model="form.channel" style="width: 100%">
+            <el-form-item label="Rule Type">
+              <el-select v-model="form.type" style="width: 100%" @change="onTypeChange">
                 <el-option
-                  v-for="c in constants.channels"
-                  :key="c"
-                  :label="c.toUpperCase()"
-                  :value="c"
+                  v-for="t in constants.rule_types"
+                  :key="t"
+                  :label="t.toUpperCase()"
+                  :value="t"
                 />
               </el-select>
             </el-form-item>
@@ -143,42 +155,67 @@
           </el-col>
         </el-row>
 
-        <!-- RULE (DYNAMIC JSON) -->
-        <div class="rule-section">
-          <div class="section-label">Rule (JSON key-value pairs)</div>
-
-          <div v-for="(row, index) in ruleRows" :key="index" class="rule-row">
-            <el-input
-              v-model="row.key"
-              placeholder="Key (e.g. pattern)"
-              style="width: 35%"
-            />
-            <span class="separator">:</span>
-            <el-input
-              v-model="row.value"
-              placeholder="Value (e.g. \b\d{16}\b)"
-              style="width: 55%"
-            />
-
-            <el-button
-              type="danger"
-              :icon="Delete"
-              circle
-              size="small"
-              @click="removeRuleRow(index)"
-              :disabled="ruleRows.length === 1"
-            />
-          </div>
-
-          <el-button
-            type="primary"
-            link
-            :icon="Plus"
-            @click="addRuleRow"
-            class="mt-2"
+        <!-- CHANNELS (MULTI-SELECT) -->
+        <el-form-item label="Channels">
+          <el-select
+            v-model="form.channels"
+            multiple
+            style="width: 100%"
+            placeholder="Select channels"
           >
-            Add Property
-          </el-button>
+            <el-option
+              v-for="c in constants.channels"
+              :key="c"
+              :label="c.toUpperCase()"
+              :value="c"
+            />
+          </el-select>
+        </el-form-item>
+
+        <!-- RULE CONFIG (flexible per rule type) -->
+        <div class="rule-section">
+          <div class="section-label">Rule Config</div>
+
+          <template v-for="field in activeRuleFields" :key="field.key">
+            <el-form-item :label="field.label">
+              <!-- Single-line list (patterns, keywords, etc.) -->
+              <template v-if="field.widget === 'list'">
+                <div v-for="(val, index) in form[field.key]" :key="index" class="rule-row">
+                  <el-input
+                    v-model="form[field.key][index]"
+                    :placeholder="field.placeholder"
+                  />
+                  <el-button
+                    type="danger"
+                    :icon="Delete"
+                    circle
+                    size="small"
+                    @click="form[field.key].splice(index, 1)"
+                    :disabled="form[field.key].length <= 1"
+                  />
+                </div>
+                <el-button
+                  type="primary"
+                  link
+                  :icon="Plus"
+                  @click="form[field.key].push('')"
+                >
+                  {{ field.addLabel || `Add ${field.label.slice(0, -1)}` }}
+                </el-button>
+              </template>
+
+              <!-- Number input -->
+              <template v-else-if="field.widget === 'number'">
+                <el-input-number
+                  v-model="form[field.key]"
+                  :min="field.min ?? 0"
+                  :max="field.max ?? 1000"
+                  :step="field.step ?? 10"
+                />
+                <span class="field-hint">{{ field.hint }}</span>
+              </template>
+            </el-form-item>
+          </template>
         </div>
 
         <el-form-item label="Description" class="mt-4">
@@ -193,11 +230,61 @@
         >
       </template>
     </el-dialog>
+
+    <!-- ASSIGN DIALOG -->
+    <el-dialog
+      v-model="assignDialogVisible"
+      :title="`Assign Policy: ${assignPolicy?.name || ''}`"
+      width="600px"
+    >
+      <el-tabs v-model="assignTab">
+        <el-tab-pane label="Agents" name="agents">
+          <el-table :data="allAgents" v-loading="assignLoading" max-height="400">
+            <el-table-column width="50">
+              <template #default="{ row }">
+                <el-checkbox
+                  :model-value="assignAgentIds.includes(row.id)"
+                  @change="(val) => toggleAssignAgent(row.id, val)"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column prop="hostname" label="HOSTNAME" />
+            <el-table-column prop="status" label="STATUS" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.status === 'active' ? 'success' : 'info'">
+                  {{ row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+        <el-tab-pane label="Groups" name="groups">
+          <el-table :data="allGroups" v-loading="assignLoading" max-height="400">
+            <el-table-column width="50">
+              <template #default="{ row }">
+                <el-checkbox
+                  :model-value="assignGroupIds.includes(row.id)"
+                  @change="(val) => toggleAssignGroup(row.id, val)"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column prop="name" label="GROUP NAME" />
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+
+      <template #footer>
+        <el-button @click="assignDialogVisible = false">Cancel</el-button>
+        <el-button type="primary" :loading="assignSubmitting" @click="handleAssignSubmit">
+          Save Assignment
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import {
   Plus,
   Edit,
@@ -233,20 +320,49 @@ const form = ref({
   id: null,
   name: "",
   description: "",
-  rule_type: "regex",
-  rule: {},
+  type: "regex",
+  patterns: [""],
+  keywords: [""],
+  channels: ["browser", "clipboard", "peripheral_storage"],
   action: "block",
-  channel: "all",
+  context_words: [],
+  context_range: 0,
   is_active: true,
 });
 
-// Dynamic rule key-value pairs for form input
-const ruleRows = ref([{ key: "", value: "" }]);
-const addRuleRow = () => {
-  ruleRows.value.push({ key: "", value: "" });
+// ── Rule config: defines which fields each rule type shows ──
+// Each field: { key, label, widget ("list" | "number"), placeholder, ... }
+const RULE_FIELDS = {
+  regex: [
+    { key: "patterns", label: "Patterns", widget: "list", placeholder: "Regex pattern (e.g. \\b4[0-9]{3}...\\b)", addLabel: "Add Pattern" },
+    { key: "context_words", label: "Context Words", widget: "list", placeholder: "Context word (e.g. credit card)", addLabel: "Add Context Word" },
+    { key: "context_range", label: "Context Range (characters)", widget: "number", min: 0, max: 1000, step: 10, hint: "How many characters around the match to check for context words. 0 = disabled." },
+  ],
+  keyword: [
+    { key: "keywords", label: "Keywords", widget: "list", placeholder: "Keyword (e.g. confidential)", addLabel: "Add Keyword" },
+    { key: "context_words", label: "Context Words", widget: "list", placeholder: "Context word (e.g. credit card)", addLabel: "Add Context Word" },
+    { key: "context_range", label: "Context Range (characters)", widget: "number", min: 0, max: 1000, step: 10, hint: "How many characters around the match to check for context words. 0 = disabled." },
+  ],
+  denylist: [
+    { key: "keywords", label: "Keywords", widget: "list", placeholder: "Keyword (e.g. confidential)", addLabel: "Add Keyword" },
+    { key: "context_words", label: "Context Words", widget: "list", placeholder: "Context word (e.g. credit card)", addLabel: "Add Context Word" },
+    { key: "context_range", label: "Context Range (characters)", widget: "number", min: 0, max: 1000, step: 10, hint: "How many characters around the match to check for context words. 0 = disabled." },
+  ],
 };
-const removeRuleRow = (index) => {
-  ruleRows.value.splice(index, 1);
+
+// Computed: fields to show for current rule type
+const activeRuleFields = computed(() => RULE_FIELDS[form.value.type] || []);
+
+// When rule type changes, ensure the correct arrays exist on form
+const onTypeChange = () => {
+  const type = form.value.type;
+  if (type === "regex") {
+    if (!form.value.patterns || form.value.patterns.length === 0) form.value.patterns = [""];
+    form.value.keywords = [];
+  } else {
+    if (!form.value.keywords || form.value.keywords.length === 0) form.value.keywords = [""];
+    form.value.patterns = [];
+  }
 };
 
 let searchTimer = null;
@@ -285,37 +401,31 @@ const handleSearch = () => {
   }, 500);
 };
 
-const prepareRuleToRows = (ruleObj) => {
-  const rows = Object.entries(ruleObj).map(([key, value]) => ({ key, value }));
-  ruleRows.value = rows.length > 0 ? rows : [{ key: "", value: "" }];
-};
-
-const prepareRowsToRule = () => {
-  const obj = {};
-  ruleRows.value.forEach((row) => {
-    if (row.key.trim()) {
-      obj[row.key.trim()] = row.value;
-    }
-  });
-  return obj;
-};
-
 const handleOpenDialog = (row = null) => {
   if (row) {
     isEdit.value = true;
-    form.value = { ...row };
-    prepareRuleToRows(row.rule);
+    form.value = {
+      ...row,
+      patterns: row.patterns?.length > 0 ? [...row.patterns] : [""],
+      keywords: row.keywords?.length > 0 ? [...row.keywords] : [""],
+      channels: row.channels?.length > 0 ? [...row.channels] : [],
+      context_words: row.context_words?.length > 0 ? [...row.context_words] : [],
+      context_range: row.context_range || 0,
+    };
   } else {
     isEdit.value = false;
     form.value = {
       name: "",
       description: "",
-      rule_type: "regex",
+      type: "regex",
+      patterns: [""],
+      keywords: [""],
+      channels: ["browser", "clipboard", "peripheral_storage"],
       action: "block",
-      channel: "all",
+      context_words: [],
+      context_range: 0,
       is_active: true,
     };
-    ruleRows.value = [{ key: "", value: "" }];
   }
   dialogVisible.value = true;
 };
@@ -323,14 +433,23 @@ const handleOpenDialog = (row = null) => {
 const handleSubmit = async () => {
   submitting.value = true;
 
-  form.value.rule = prepareRowsToRule();
+  // Clean up empty patterns/keywords
+  const payload = { ...form.value };
+  if (payload.type === "regex") {
+    payload.patterns = payload.patterns.filter((p) => p.trim());
+    payload.keywords = [];
+  } else {
+    payload.keywords = payload.keywords.filter((k) => k.trim());
+    payload.patterns = [];
+  }
+  payload.context_words = payload.context_words.filter((c) => c.trim());
 
   try {
     if (isEdit.value) {
-      await apiClient.put(`/policies/${form.value.id}`, form.value);
+      await apiClient.put(`/policies/${payload.id}`, payload);
       ElMessage.success("Policy updated");
     } else {
-      await apiClient.post("/policies/", form.value);
+      await apiClient.post("/policies/", payload);
       ElMessage.success("Policy created");
     }
     dialogVisible.value = false;
@@ -358,12 +477,83 @@ const handleDelete = (id) => {
   });
 };
 
+// ── Assign policy to agents / groups ──
+const assignDialogVisible = ref(false);
+const assignTab = ref("agents");
+const assignPolicy = ref(null);
+const assignLoading = ref(false);
+const assignSubmitting = ref(false);
+const allAgents = ref([]);
+const allGroups = ref([]);
+const assignAgentIds = ref([]);
+const assignGroupIds = ref([]);
+
+const handleOpenAssign = async (row) => {
+  assignPolicy.value = row;
+  assignTab.value = "agents";
+  assignAgentIds.value = (row.policies ? [] : []); // will be populated from row if available
+  assignGroupIds.value = [];
+  assignDialogVisible.value = true;
+
+  // Pre-select agents/groups already assigned
+  assignLoading.value = true;
+  try {
+    const [aRes, gRes] = await Promise.all([
+      apiClient.get("/agents/", { params: { page: 1, page_size: 100 } }),
+      apiClient.get("/agent-groups/", { params: { page: 1, page_size: 100 } }),
+    ]);
+    allAgents.value = aRes.data.items || [];
+    allGroups.value = gRes.data.items || [];
+
+    // Load current assignments from the policy detail
+    const pRes = await apiClient.get(`/policies/${row.id}`);
+    const policyDetail = pRes.data;
+    assignAgentIds.value = (policyDetail.individual_agents || []).map((a) => a.id);
+    assignGroupIds.value = (policyDetail.agent_groups || []).map((g) => g.id);
+  } finally {
+    assignLoading.value = false;
+  }
+};
+
+const toggleAssignAgent = (id, checked) => {
+  if (checked) {
+    if (!assignAgentIds.value.includes(id)) assignAgentIds.value.push(id);
+  } else {
+    assignAgentIds.value = assignAgentIds.value.filter((x) => x !== id);
+  }
+};
+
+const toggleAssignGroup = (id, checked) => {
+  if (checked) {
+    if (!assignGroupIds.value.includes(id)) assignGroupIds.value.push(id);
+  } else {
+    assignGroupIds.value = assignGroupIds.value.filter((x) => x !== id);
+  }
+};
+
+const handleAssignSubmit = async () => {
+  assignSubmitting.value = true;
+  try {
+    const policyId = assignPolicy.value.id;
+    await Promise.all([
+      apiClient.post(`/policies/${policyId}/assign-agents`, assignAgentIds.value),
+      apiClient.post(`/policies/${policyId}/assign-groups`, assignGroupIds.value),
+    ]);
+    ElMessage.success("Policy assigned successfully");
+    assignDialogVisible.value = false;
+  } catch (e) {
+    ElMessage.error("Error assigning policy");
+  } finally {
+    assignSubmitting.value = false;
+  }
+};
+
 onMounted(fetchData);
 
 const getActionType = (action) => {
   const map = {
     block: "danger",
-    alert: "warning",
+    allow_log: "warning",
     allow: "success",
   };
   return map[action?.toLowerCase()] || "info";
@@ -390,12 +580,13 @@ const getActionType = (action) => {
   gap: 10px;
   margin-bottom: 10px;
 }
-.separator {
-  font-weight: bold;
-  color: #94a3b8;
+.channel-tag {
+  margin-right: 4px;
 }
-.mt-2 {
-  margin-top: 8px;
+.field-hint {
+  margin-left: 12px;
+  font-size: 12px;
+  color: #94a3b8;
 }
 .mt-4 {
   margin-top: 16px;
