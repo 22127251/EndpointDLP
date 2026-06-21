@@ -252,12 +252,22 @@ class CloudBridge:
             "# Source: Management Console (heartbeat)\n"
         )
         try:
+            import re
             import yaml
             content = header + yaml.dump(
                 local,
                 sort_keys=False,
                 allow_unicode=True,
                 default_flow_style=False,
+            )
+            # Inline channels list: "channels:\n- a\n- b" → "channels: [a, b]"
+            def _inline_list(match):
+                items = [l.strip() for l in match.group(1).splitlines() if l.strip().startswith("- ")]
+                return "channels: [" + ", ".join(l.lstrip("- ") for l in items) + "]\n"
+            content = re.sub(
+                r"channels:\n((?:  - .+\n?)+)",
+                _inline_list,
+                content,
             )
             _write_yaml_atomic(self._policies_file, content)
             log.info(
