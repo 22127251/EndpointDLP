@@ -253,8 +253,21 @@ class CloudBridge:
         )
         try:
             import yaml
+
+            class FlowListEncoder(yaml.SafeDumper):
+                """SafeDumper that renders short lists inline."""
+                pass
+
+            def _represent_list(dumper, data):
+                if all(isinstance(v, str) and len(v) < 40 for v in data):
+                    return dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=True)
+                return dumper.represent_sequence("tag:yaml.org,2002:seq", data)
+
+            FlowListEncoder.add_representer(list, _represent_list)
+
             content = header + yaml.dump(
                 local,
+                Dumper=FlowListEncoder,
                 sort_keys=False,
                 allow_unicode=True,
                 default_flow_style=False,
