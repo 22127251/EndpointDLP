@@ -37,6 +37,11 @@ const routes = [
         component: () => import("@/views/ViolationLogs.vue"),
       },
       {
+        path: "agent-logs",
+        name: "Agent Logs",
+        component: () => import("@/views/AgentLogs.vue"),
+      },
+      {
         path: "settings",
         name: "Settings",
         component: () => import("@/views/Settings.vue"),

@@ -48,6 +48,11 @@
             <span>Violation Logs</span>
           </el-menu-item>
 
+          <el-menu-item index="/agent-logs">
+            <el-icon><Document /></el-icon>
+            <span>Agent Logs</span>
+          </el-menu-item>
+
           <el-menu-item index="/audit-logs">
             <el-icon><Checked /></el-icon>
             <span>Audit Logs</span>
@@ -115,6 +120,7 @@ import {
   User,
   Setting,
   SwitchButton,
+  Document,
 } from "@element-plus/icons-vue";
 import { useRouter } from "vue-router";
 import { useAuthStore } from "@/store/auth";
