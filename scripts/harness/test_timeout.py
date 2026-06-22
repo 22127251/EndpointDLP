@@ -2,11 +2,11 @@
 
 When analysis exceeds the orchestrator's `_ANALYSIS_TIMEOUT` (4 s), the
 dispatcher returns the channel's failure_mode verdict. With the default
-fail_closed that is BLOCK + "Analysis timed out" reason, which these tests pin
-(including the user-facing reason string). The fail_open counterpart — and the
-oversize/error failure paths — live in test_failure_mode.py. We force the slow
-path via the DLP_TEST_SLOW_MS env var (5 s sleep) so the test is deterministic
-instead of dependent on extract_text timing.
+fail_closed that is BLOCK + the per-category "timeout" user message, which these
+tests pin (including the user-facing reason string). The fail_open counterpart —
+and the oversize/error failure paths — live in test_failure_mode.py. We force the
+slow path via the DLP_TEST_SLOW_MS env var (5 s sleep) so the test is
+deterministic instead of dependent on extract_text timing.
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ import time
 import pytest
 
 from pipe_helpers import pipe_send
+
+from orchestrator import messages
 
 
 @pytest.mark.slow
@@ -34,7 +36,7 @@ def test_browser_analysis_timeout_blocks(make_orchestrator):
     elapsed = time.monotonic() - start
 
     assert decision == "BLOCK", f"expected BLOCK on timeout, got {decision!r}"
-    assert "timed out" in reason.lower(), f"expected timeout reason, got {reason!r}"
+    assert reason == messages.FAILURE_MESSAGES["timeout"], f"expected timeout reason, got {reason!r}"
     # Server-side budget is 4 s; allow generous margin for spawn/spurious latency.
     assert elapsed < 6.0, f"timeout took too long: {elapsed:.2f}s"
 

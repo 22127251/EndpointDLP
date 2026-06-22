@@ -16,12 +16,12 @@ pools:
   pipe_listeners:             4
 
 limits:
-  max_clipboard_bytes: 1048576       # 1 MB
-  max_file_bytes:      104857600     # 100 MB (browser)
-  # The per-channel verdict on an oversize input is now folded into the unified
-  # `failure_mode` knob on each channel's own section (clipboard / browser /
-  # peripheral_storage.transfer_agent below) — one setting covers oversize,
-  # timeout, and analysis-error. The reason is still logged as reason=size_limit.
+  max_file_bytes:      104857600     # 100 MB (browser upload cap)
+  # The clipboard text cap moved to clipboard.max_input_bytes (the section the
+  # ClipboardInterceptor itself reads). The per-channel verdict on an oversize
+  # input is folded into the unified `failure_mode` knob on each channel's own
+  # section (clipboard / browser / peripheral_storage.transfer_agent below) — one
+  # setting covers oversize, timeout, and analysis-error. Reason logged reason=size_limit.
 
 analyzer:
   # Cap on extracted text per file analysis (characters; ~2 bytes each in memory).
@@ -31,6 +31,20 @@ analyzer:
   # logged reason=text_cap. ~16M chars ≈ a few hundred MB peak/analysis, which keeps
   # the 7-worker worst case ≈ 1 GB on the 8 GB VM. Set <=0 to disable the cap.
   max_extracted_chars: 16000000
+
+  # File extensions the analyzer is built + tested to extract and scan. A file
+  # with an explicit, NON-LISTED extension is refused BEFORE extraction (so an
+  # untested or binary type is never scanned as garbage text) and follows the
+  # channel's failure_mode (logged reason=unsupported_format). A file with NO
+  # extension is NOT refused — some upload paths strip it (Gmail delivers every
+  # file as "upload"), so it falls through to the plaintext analyzer (PII recall
+  # preserved). The list is the 8 tested
+  # formats (docx/odt/ods/xlsx/csv/txt/md/pdf) plus clearly-textual fallbacks
+  # (tsv/json/yaml/yml/log). Only the FILE channels (browser, peripheral_storage)
+  # consult it — clipboard text has no extension. Applied at service START (like
+  # max_extracted_chars; `dlp-ctl reload` does NOT re-read it). Matching is
+  # case-insensitive; a leading dot is added if omitted.
+  supported_extensions: [.docx, .odt, .ods, .xlsx, .csv, .tsv, .txt, .md, .pdf, .json, .yaml, .yml, .log]
 
 supervisor:                          # Consumed in Phase C; harmless to keep now.
   max_restarts: 3
@@ -77,102 +91,58 @@ install:
 # ── Per-component sections (each component reads ONLY its own subtree) ──
 
 clipboard:
+  # Cap on copied-text size sent for analysis (UTF-8 bytes). The ClipboardInterceptor
+  # rejects larger copies locally and the orchestrator rejects them server-side. Raise
+  # to allow bigger pastes, but keep it within the analysis budget
+  # (service.analysis_timeout_seconds): a near-cap paste must finish analysis in time
+  # or it fails closed.
+  max_input_bytes: 8388608           # 8 MB
   pipe_timeout_ms: 12000             # client wait > orchestrator analysis (10 s)
-  # Orchestrator-side verdict on ANY analysis failure for this channel
-  # (timeout / oversize / analysis-error): fail_closed → BLOCK (default),
-  # fail_open → ALLOW. (Phase 7 also makes the client's pipe-fail path honor this.)
+  # Verdict on ANY failure for this channel — orchestrator-side (timeout / oversize /
+  # analysis-error) AND the client's own pipe/connect failure (Phase 7):
+  # fail_closed → BLOCK (default), fail_open → ALLOW.
   failure_mode: fail_closed
 
 browser:                             # All fields migrated from interceptors/browser/config.yaml.
-  pipe_timeout_seconds: 12           # client wait > orchestrator analysis (10 s)
-  fail_behavior: "open"             # "allow" | "block" on CLIENT pipe error (retired in Phase 7)
-  # Orchestrator-side verdict on ANY analysis failure for this channel
-  # (timeout / oversize / analysis-error): fail_closed → BLOCK (default),
-  # fail_open → ALLOW.
+  pipe_timeout_ms: 12000             # was pipe_timeout_seconds; client wait > orchestrator analysis (10 s)
+  # Verdict on ANY failure for this channel — orchestrator-side (timeout / oversize /
+  # analysis-error) AND the addon's own pipe/connect failure (Phase 7; replaces the old
+  # fail_behavior): fail_closed → BLOCK (default), fail_open → ALLOW.
+  # NOTE: default fail_closed now BLOCKS uploads when the orchestrator is down
+  # (the retired fail_behavior:"open" let them through).
   failure_mode: fail_closed
-  temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp"   # empty → system %TEMP%
-  min_upload_size_bytes: 1024
+  # The upload filters (extensions / mime_types / domain_blocklist /
+  # upload_url_keywords), min_upload_size_bytes, and temp_dir are HARDCODED in
+  # interceptors/browser/config.py (rarely changed; not admin-exposed). temp_dir
+  # resolves to the system %TEMP%. Edit that file to change them.
 
-  # Domains to skip unconditionally (analytics, telemetry, logging)
-  domain_blocklist:
-    - google-analytics.com
-    - analytics.google.com
-    - beacons.gcp.gvt2.com
-    - beacons.gvt2.com
-    - beacons3.gvt2.com
-    - ssl.gstatic.com
+peripheral_storage:
+  controller:                        # The Controller (DLL injector) reads this subtree.
+    # Verdict applied INSIDE the C++ NtCreateFile hook when shared memory is
+    # unavailable/unreadable: fail_closed → block the removable-drive WRITE,
+    # fail_open → allow it through. (Affects WRITE / directory-create ops only;
+    # reads/navigation always pass.) Written into the shared-memory drive map for
+    # the hook; hot-reloadable. NOTE: default is now fail_closed (was fail_mode: open).
+    failure_mode: fail_closed        # was peripheral_storage.fail_mode (open/closed)
+    target_processes:
+      - explorer.exe
+    shared_memory_name: UsbDlpDriveMap # NOT hot-reloadable (see config_watcher in __main__.py)
+    payload_dll_path: Payload.dll      # relative → resolved against Controller.exe dir
 
-  # URL path/query keywords that signal a real upload endpoint.
-  upload_url_keywords:
-    - upload
-    - attach
-    - import
-
-  # File type allow-list. Leave both lists empty to inspect everything.
-  extensions:
-    - .pdf
-    - .doc
-    - .docx
-    - .xls
-    - .xlsx
-    - .ppt
-    - .pptx
-    - .odt
-    - .ods
-    - .odp
-    - .zip
-    - .rar
-    - .7z
-    - .tar
-    - .gz
-    - .csv
-    - .txt
-
-  mime_types:
-    - application/pdf
-    - application/msword
-    - application/vnd.openxmlformats-officedocument.wordprocessingml.document
-    - application/vnd.ms-excel
-    - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
-    - application/vnd.ms-powerpoint
-    - application/vnd.openxmlformats-officedocument.presentationml.presentation
-    - application/vnd.oasis.opendocument.text
-    - application/vnd.oasis.opendocument.spreadsheet
-    - application/vnd.oasis.opendocument.presentation
-    - application/zip
-    - application/x-rar-compressed
-    - application/x-7z-compressed
-    - application/x-tar
-    - application/gzip
-    - text/plain
-    - text/csv
-
-peripheral_storage:                  # Controller reads this whole subtree.
-  target_processes:
-    - explorer.exe
-
-  # Behavior when shared memory is unavailable or cannot be read inside the hook.
-  # "open"   (default) — allow the file operation through
-  # "closed" — block all removable-drive writes when unsure
-  fail_mode: open
-
-  shared_memory_name: UsbDlpDriveMap # NOT hot-reloadable (see config_watcher in __main__.py)
-  payload_dll_path: Payload.dll      # relative → resolved against Controller.exe dir
-
-  # Phase E (E0 spike result). false → Controller runs once in Session 0
-  # (LocalSystem service) and injects cross-session into every user's explorer.exe
-  # (Option A; SeDebugPrivilege enabled in the Controller). Set true ONLY if the
-  # E0 spike shows cross-session injection fails on this OS — then the service
-  # launches a Controller per user session via CreateProcessAsUser with the user's
-  # elevated/linked token (Option B). Ignored in --foreground (always Session-local).
-  controller_in_user_session: false
+    # Phase E (E0 spike result). false → Controller runs once in Session 0
+    # (LocalSystem service) and injects cross-session into every user's explorer.exe
+    # (Option A; SeDebugPrivilege enabled in the Controller). Set true ONLY if the
+    # E0 spike shows cross-session injection fails on this OS — then the service
+    # launches a Controller per user session via CreateProcessAsUser with the user's
+    # elevated/linked token (Option B). Ignored in --foreground (always Session-local).
+    in_user_session: false           # was controller_in_user_session
 
   transfer_agent:                    # TransferAgent reads only this nested subtree.
     connect_timeout_ms: 5000         # was hardcoded in OrchestratorClient.cs:24
-    analysis_timeout_seconds: 12     # client wait > orchestrator analysis (10 s)
-    # Orchestrator-side verdict for peripheral-channel analysis failures
-    # (timeout / oversize / analysis-error): fail_closed → BLOCK (default),
-    # fail_open → ALLOW. (Phase 7 wires the C# client's pipe-fail path to this.)
+    analysis_timeout_ms: 12000       # was analysis_timeout_seconds; client wait > orchestrator analysis (10 s)
+    # Verdict for peripheral-channel failures — orchestrator-side (timeout / oversize /
+    # analysis-error) AND the C# client's own pipe/connect failure (Phase 7):
+    # fail_closed → BLOCK (default), fail_open → ALLOW.
     failure_mode: fail_closed
 
 # ── Phase AC-3: App Control (WDAC) channel (orchestrator-internal daemon threads) ──

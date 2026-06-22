@@ -5,6 +5,31 @@ from pathlib import Path
 
 import yaml
 
+# Default analyzer-supported file extensions (lowercase, leading dot): the 8
+# tested formats + clearly-textual fallbacks. See supported_extensions below.
+_DEFAULT_SUPPORTED_EXTENSIONS = [
+    ".docx", ".odt", ".ods", ".xlsx", ".csv", ".tsv",
+    ".txt", ".md", ".pdf", ".json", ".yaml", ".yml", ".log",
+]
+
+
+def _normalize_extensions(raw_list) -> list:
+    """Normalize a configured extension list to lowercase, leading-dot form
+    (so ``XLSX`` / ``.XLSX`` / ``xlsx`` all match). Falls back to the default
+    list when the config omits the key or supplies an empty/non-list value."""
+    if not isinstance(raw_list, list) or not raw_list:
+        return list(_DEFAULT_SUPPORTED_EXTENSIONS)
+    out: list[str] = []
+    for ext in raw_list:
+        e = str(ext).strip().lower()
+        if not e:
+            continue
+        if not e.startswith("."):
+            e = "." + e
+        if e not in out:
+            out.append(e)
+    return out or list(_DEFAULT_SUPPORTED_EXTENSIONS)
+
 
 @dataclass
 class OrchestratorConfig:
@@ -59,6 +84,15 @@ class OrchestratorConfig:
     # per-analysis memory AND time. Sourced from analyzer.max_extracted_chars.
     # ~16M chars ≈ a few hundred MB peak/analysis; <=0 disables the cap.
     max_extracted_chars: int = 16_000_000
+    # Allow-list of file extensions the analyzer will extract + scan (lowercase,
+    # leading dot). A file whose extension is NOT here is refused BEFORE
+    # extraction and follows the channel's failure_mode (reason=unsupported_format)
+    # — so an untested/binary type (e.g. .exe, .jpg, .pptx) is never scanned as
+    # garbage text. Sourced from analyzer.supported_extensions; applied at service
+    # start (like max_extracted_chars). Only the file channels (browser /
+    # peripheral_storage) consult it; clipboard text has no extension.
+    supported_extensions: list = field(
+        default_factory=lambda: list(_DEFAULT_SUPPORTED_EXTENSIONS))
     # Phase AC-3 additions — the App Control (WDAC) channel. Sourced from the
     # app_control: section in config.yaml. Defaulted so pre-AC-3 fixtures that
     # build the dataclass directly (test_supervisor.py:_minimal_config) don't need
@@ -121,7 +155,11 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         browser_workers=pools.get("browser_workers", 3),
         peripheral_storage_workers=pools.get("peripheral_storage_workers", 2),
         pipe_listeners=pools.get("pipe_listeners", 4),
-        max_clipboard_bytes=limits.get("max_clipboard_bytes", 1048576),
+        # Phase 7: the clipboard text cap moved to clipboard.max_input_bytes (the
+        # section the ClipboardInterceptor reads). Fall back to the old
+        # limits.max_clipboard_bytes so pre-Phase-7 fixtures/configs still parse.
+        max_clipboard_bytes=clipboard_cfg.get(
+            "max_input_bytes", limits.get("max_clipboard_bytes", 8388608)),
         max_file_bytes=limits.get("max_file_bytes", 104857600),
         max_restarts=supervisor.get("max_restarts", 3),
         restart_window_seconds=supervisor.get("restart_window_seconds", 60),
@@ -154,6 +192,7 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         analysis_timeout_seconds=float(service.get("analysis_timeout_seconds", 4.0)),
         failure_mode=failure_mode,
         max_extracted_chars=analyzer.get("max_extracted_chars", 16_000_000),
+        supported_extensions=_normalize_extensions(analyzer.get("supported_extensions")),
         app_control_enabled=app_control.get("enabled", True),
         app_control_inbox_dir=app_control.get("inbox_dir", ""),
         app_control_rejected_dir=app_control.get("rejected_dir", ""),

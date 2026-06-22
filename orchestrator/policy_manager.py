@@ -113,13 +113,14 @@ class PolicyManager:
         self._observer.stop()
         self._observer.join()
 
-    def _oversize_verdict(self, channel: str, req_id: str, detail: str) -> tuple[str, list]:
+    def _oversize_verdict(self, channel: str, req_id: str, detail: str) -> tuple[str, list, str]:
         """Verdict for input over the size cap. Follows the channel's unified
         failure_mode (fail_closed → BLOCK default, fail_open → ALLOW); the reason
-        is recorded in the log."""
+        is recorded in the log. Third tuple element is the failure category the
+        dispatcher maps to a user message + the events.jsonl `reason` token."""
         decision = self._cfg.verdict_for(channel)
         log.warning("reason=size_limit req=%s channel=%s %s -> %s", req_id, channel, detail, decision)
-        return decision, []
+        return decision, [], "oversize"
 
     def analyze(
         self,
@@ -128,7 +129,12 @@ class PolicyManager:
         text: str | None = None,
         file_path: str | None = None,
         req_id: str = "",
-    ) -> tuple[str, list]:
+    ) -> tuple[str, list, str | None]:
+        """Return (decision, violations, failure_category). failure_category is a
+        token (oversize / text_cap / unsupported_format / malformed) when the
+        analysis was refused, or None for a completed analysis (allow / policy
+        block). The dispatcher turns the token into the user message + the
+        events.jsonl `reason`."""
         with self._engine_lock:
             engine = self._engine  # snapshot — lock release/acquire orders strictly against reload
         if kind == "text":
@@ -144,8 +150,29 @@ class PolicyManager:
         elif kind == "file":
             if not file_path:
                 log.error("kind=file but no file_path provided; failing closed.")
-                return "BLOCK", []
+                return "BLOCK", [], "malformed"
             filename = os.path.basename(file_path)
+            # Supported-format gate: refuse an extension the analyzer was not
+            # built/tested to extract (e.g. .exe, .jpg, .pptx) BEFORE extraction,
+            # so it is never scanned as garbage text. Follows the channel's
+            # failure_mode (reason=unsupported_format), like the oversize path.
+            #
+            # An EMPTY extension is NOT refused: some upload paths strip it (Gmail
+            # delivers every file as "upload" with no extension), so blocking on a
+            # missing extension would block legitimate .txt/.csv/.md uploads. Those
+            # fall through to the analyzer's plaintext path — PII recall is
+            # preserved (a binary blob with no extension simply yields no matches).
+            # Only an explicit, non-empty, unsupported extension is refused.
+            ext = os.path.splitext(filename)[1].lower()
+            if ext and ext not in self._cfg.supported_extensions:
+                decision = self._cfg.verdict_for(channel)
+                log.warning("reason=unsupported_format req=%s channel=%s file=%s ext=%s -> %s",
+                            req_id, channel, filename, ext or "(none)", decision)
+                try:
+                    os.unlink(file_path)
+                except OSError as e:
+                    log.warning("Could not delete unsupported temp file %s: %s", file_path, e)
+                return decision, [], "unsupported_format"
             size = os.path.getsize(file_path)
             cap = getattr(self._cfg, "max_file_bytes", 1 << 60)
             if size > cap:
@@ -155,47 +182,81 @@ class PolicyManager:
                 except OSError as e:
                     log.warning("Could not delete oversized temp file %s: %s", file_path, e)
                 return verdict
-            content_label = f"file={filename} size={size}"
+            # DIAG (dlp-agent.log only): fingerprint the EXACT bytes about to be
+            # analyzed. A "same file → different counts" report can then be pinned
+            # to the INPUT (a differing sha8 = the client delivered different bytes)
+            # vs the analyzer (identical sha8 but different counts). Reversible.
+            sha8 = _sha8_of_file(file_path)
             cap_chars = self._cfg.max_extracted_chars
             max_chars = cap_chars if cap_chars and cap_chars > 0 else None
             try:
                 if is_tabular(file_path):
-                    result = engine.analyze_tabular(
-                        extract_tabular(file_path, max_chars=max_chars), channel)
+                    td = extract_tabular(file_path, max_chars=max_chars)
+                    extracted_chars = _tabular_char_count(td)
+                    result = engine.analyze_tabular(td, channel)
                 else:
-                    result = engine.analyze(
-                        extract_text(file_path, max_chars=max_chars), channel)
+                    text = extract_text(file_path, max_chars=max_chars)
+                    extracted_chars = len(text)
+                    result = engine.analyze(text, channel)
             except ExtractionTooLarge as exc:
                 # Extracted text over analyzer.max_extracted_chars — refuse the
                 # analysis and follow the channel's failure_mode (like oversize).
                 decision = self._cfg.verdict_for(channel)
-                log.warning("reason=text_cap req=%s channel=%s file=%s chars=%d > cap=%s -> %s",
-                            req_id, channel, filename, exc.char_count, cap_chars, decision)
-                return decision, []
+                log.warning("reason=text_cap req=%s channel=%s file=%s size=%d sha8=%s chars=%d > cap=%s -> %s",
+                            req_id, channel, filename, size, sha8, exc.char_count, cap_chars, decision)
+                return decision, [], "text_cap"
             finally:
                 try:
                     os.unlink(file_path)
                 except OSError as e:
                     log.warning("Could not delete temp file %s: %s", file_path, e)
+            content_label = f"file={filename} size={size} sha8={sha8} extracted_chars={extracted_chars}"
+            # One INFO line per file decision carrying the input fingerprint + result,
+            # so even an ALLOW (which logs at DEBUG below) is captured for correlation.
+            log.info("DIAG req=%s channel=%s file=%s size=%d sha8=%s extracted_chars=%d action=%s counts=[%s]",
+                     req_id, channel, filename, size, sha8, extracted_chars,
+                     result.applied_action, _fmt_violations(result.violations))
         else:
             log.error("Unknown kind=%r; failing closed.", kind)
-            return "BLOCK", []
+            return "BLOCK", [], "malformed"
 
         action = result.applied_action
         if action == "block":
             log.warning("BLOCK req=%s channel=%s %s elapsed=%.1fms violations=[%s]",
                         req_id, channel, content_label, result.elapsed_ms,
                         _fmt_violations(result.violations))
-            return "BLOCK", result.violations
+            return "BLOCK", result.violations, None
         elif action == "allow_log":
             log.info("ALLOW(logged) req=%s channel=%s %s elapsed=%.1fms violations=[%s]",
                      req_id, channel, content_label, result.elapsed_ms,
                      _fmt_violations(result.violations))
-            return "ALLOW", result.violations
+            return "ALLOW", result.violations, None
         else:
             log.debug("ALLOW req=%s channel=%s %s elapsed=%.1fms",
                       req_id, channel, content_label, result.elapsed_ms)
-            return "ALLOW", result.violations
+            return "ALLOW", result.violations, None
+
+
+def _sha8_of_file(path: str) -> str:
+    """First 8 hex chars of the SHA-256 of *path*'s bytes — a cheap fingerprint
+    of the exact input the analyzer saw (streamed in 1 MB chunks). Returns
+    '????????' if the file can't be read. DIAGNOSTIC only (dlp-agent.log)."""
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return "????????"
+    return h.hexdigest()[:8]
+
+
+def _tabular_char_count(td) -> int:
+    """Extracted-character count for tabular data (cell values + body; headers
+    negligible) — mirrors extractor._enforce_tabular_cap so the logged
+    extracted_chars matches the cap accounting."""
+    return (sum(len(v) for c in td.columns for v in c.values)
+            + sum(len(b) for b in td.body))
 
 
 def _fmt_violations(violations: list) -> str:

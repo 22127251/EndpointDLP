@@ -213,3 +213,41 @@ def test_normalize_ws_heals_wrapped_pii(tmp_path):
     res = eng.analyze("thẻ visa 4111 1111\n1111 1111", "browser")
     assert len(_matches(res, "visa")) == 1
     assert normalize_ws("a \n b\t c") == "a b c"
+
+
+# --- user_message propagation (end-user block reason) -----------------------
+
+_WITH_MSG = """
+policies:
+  - id: visa
+    name: VISA
+    user_message: "Phát hiện thẻ Visa"
+    channels: [browser]
+    type: regex
+    patterns: ["\\\\b4\\\\d{3} ?\\\\d{4} ?\\\\d{4} ?\\\\d{4}\\\\b"]
+    context_words: ["visa"]
+    context_range: 40
+    actions:
+      - {min_score: 0.0, action: block}
+  - id: nomsg
+    name: NoMessage
+    channels: [browser]
+    type: regex
+    patterns: ["\\\\bSECRET\\\\b"]
+    actions:
+      - {min_score: 0.0, action: block}
+"""
+
+
+def test_violation_carries_policy_user_message(tmp_path):
+    eng = _engine(tmp_path, _WITH_MSG)
+    # plain-text path
+    v = _violation(eng.analyze("visa 4111 1111 1111 1111", "browser"), "visa")
+    assert v is not None and v.user_message == "Phát hiện thẻ Visa"
+    # a policy with no user_message → empty string (the dispatcher fills a generic)
+    v2 = _violation(eng.analyze("this is SECRET", "browser"), "nomsg")
+    assert v2 is not None and v2.user_message == ""
+    # tabular path populates it too (different Violation build site)
+    td = TabularData(columns=[ColumnBlock(header="visa", values=["4111 1111 1111 1111"], sheet=None)])
+    vt = _violation(eng.analyze_tabular(td, "browser"), "visa")
+    assert vt is not None and vt.user_message == "Phát hiện thẻ Visa"

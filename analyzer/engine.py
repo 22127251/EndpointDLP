@@ -97,6 +97,7 @@ class Violation:
     action: str                       # strongest action among this policy's matches
     matches: list[Match]
     context_words: list[str] = field(default_factory=list)  # unique words that boosted any match
+    user_message: str = ""            # end-user block reason (Policy.user_message; "" → generic)
 
 
 @dataclass
@@ -400,6 +401,7 @@ class DLPEngine:
                 action=_strongest_match_action(matches),
                 matches=matches,
                 context_words=_collect_context_words(matches),
+                user_message=self._policy_lookup[pid].user_message,
             ))
         return merged
 
@@ -448,6 +450,7 @@ class DLPEngine:
                 action=_strongest_match_action(matches),
                 matches=matches,
                 context_words=_collect_context_words(matches),
+                user_message=policy.user_message,
             ))
         return violations
 

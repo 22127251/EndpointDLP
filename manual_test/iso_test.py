@@ -178,14 +178,18 @@ def main() -> int:
                 expected = _EXPECTED.get(mm.group(1)) if mm else None
                 zeros = {"VISA": 0, "CCCD": 0, "PHONE": 0}
                 summary_rows.append((f.name, "capped", zeros, zeros, expected, e.char_count,
-                                     elapsed_ms, "block", True, True, True))
+                                     elapsed_ms, "block", True, True, True, 0))
                 continue
             elapsed_ms = (time.perf_counter() - t0) * 1000
 
-            # analyzer per-type counts (+ confidential keyword count)
+            # analyzer per-type counts (+ confidential keyword count + total
+            # with_context across ALL policies — mirrors the events.jsonl
+            # `with_context` field so this tester can spot the same count drift)
             acounts = {"VISA": 0, "CCCD": 0, "PHONE": 0}
             confid = 0
+            wctx = 0
             for v in result.violations:
+                wctx += sum(1 for m in v.matches if m.has_context)
                 ty = pii_type(v.policy_id)
                 if ty:
                     acounts[ty] += len(v.matches)
@@ -202,7 +206,7 @@ def main() -> int:
             all_pass &= ok
 
             summary_rows.append((f.name, mode, acounts, ocounts, expected, confid,
-                                 elapsed_ms, result.applied_action, ok, parity, corpus_ok))
+                                 elapsed_ms, result.applied_action, ok, parity, corpus_ok, wctx))
 
             # matches.csv rows (PII only by default; --all adds confidential keywords)
             for v in result.violations:
@@ -228,15 +232,15 @@ def main() -> int:
     # summary table
     lines = []
     hdr = (f"{'file':18s} {'mode':7s} {'analyzer V/C/P':16s} {'oracle V/C/P':16s} "
-           f"{'exp':>4s} {'confid':>6s} {'ms':>7s} {'verdict':9s} result")
+           f"{'exp':>4s} {'confid':>6s} {'wctx':>6s} {'ms':>7s} {'verdict':9s} result")
     lines.append(hdr)
     lines.append("-" * len(hdr))
-    for (name, mode, a, o, exp, confid, ms, verdict, ok, parity, corpus_ok) in summary_rows:
+    for (name, mode, a, o, exp, confid, ms, verdict, ok, parity, corpus_ok, wctx) in summary_rows:
         astr = f"{a['VISA']}/{a['CCCD']}/{a['PHONE']}"
         ostr = f"{o['VISA']}/{o['CCCD']}/{o['PHONE']}"
         res = "PASS" if ok else ("FAIL(parity)" if not parity else "FAIL(corpus)")
         lines.append(f"{name:18s} {mode:7s} {astr:16s} {ostr:16s} "
-                     f"{str(exp or '-'):>4s} {confid:6d} {ms:7.0f} {verdict:9s} {res}")
+                     f"{str(exp or '-'):>4s} {confid:6d} {wctx:6d} {ms:7.0f} {verdict:9s} {res}")
     lines.append("-" * len(hdr))
     lines.append("ALL PASS" if all_pass else "SOME FAILED")
     table = "\n".join(lines)

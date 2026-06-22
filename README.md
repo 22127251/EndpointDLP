@@ -149,13 +149,13 @@ python -m pytest scripts\harness -v
 & "<RepoRoot>\.venv\Scripts\python.exe" -m pytest scripts\harness -q
 ```
 
-**Expected: `35 passed, 3 skipped`.** The 3 skips are the **admin-pipe** tests in `test_admin.py` — they require an **elevated** process (the admin-pipe DACL is Administrators-only) and correctly skip under a normal prompt. To run them too, launch PowerShell **as Administrator** and re-run; they should pass.
+**Expected: `145 passed, 3 skipped`.** The 3 skips are the **admin-pipe** tests in `test_admin.py` — they require an **elevated** process (the admin-pipe DACL is Administrators-only) and correctly skip under a normal prompt. To run them too, launch PowerShell **as Administrator** and re-run; they should pass.
 
 - **Policies used by the automated tests:** `scripts\harness\fixture_policies\permissive.yaml` (default — allows everything) and `visa_block.yaml` (blocks a Visa-format number with no context). You normally do **not** edit these.
 - **Config used:** auto-generated per test (unique pipe names) under `tmp\harness\<uuid>\config.yaml`.
 - **Logs:** isolated per test under `tmp\harness\<uuid>\DLP\logs\` (the harness redirects `%PROGRAMDATA%` so tests never touch the real log dir). The whole `tmp\harness\` tree is cleaned on teardown.
 
-> ✅ **PRE-TESTED** — `35 passed, 3 skipped` in ~17 s on the dev box (non-elevated, so the 3 admin-pipe tests skipped as expected). A trailing `cleanup_numbered_dir … PermissionError` line from pytest's own temp-symlink cleanup is a benign Windows quirk printed *after* the result and does not affect the outcome.
+> ✅ **PRE-TESTED** — `145 passed, 3 skipped` in ~45 s on the dev box (non-elevated, so the 3 admin-pipe tests skipped as expected). A trailing `cleanup_numbered_dir … PermissionError` line from pytest's own temp-symlink cleanup is a benign Windows quirk printed *after* the result and does not affect the outcome.
 
 ### C# unit tests (xUnit)
 
@@ -267,10 +267,11 @@ dlp-ctl appcontrol disable --force-local               # emergency removal drivi
 Make a test file/text that contains **both** a matching number **and** a context word (e.g. a `.csv`/`.txt`/`.docx` with `credit card: 4111 1111 1111 1111`). A clean file (no PII, or PII without context) should **ALLOW**.
 
 **Manual checks:**
-1. **USB block** — copy any file to a removable drive via Explorer → blocked; right-click a file → **"Transfer to USB (DLP Protected)"** → the TransferAgent scans it → ALLOW for clean, BLOCK for a CCCD/Visa-with-context file.
-2. **Browser** — upload the test file via Google Drive / Gmail → BLOCK shows a popup on your desktop; clean upload proceeds.
-3. **Clipboard** — copy text containing a card+context → blocked.
-4. **Audit** — confirm a line per decision in `events.jsonl` and a BLOCK/ALLOW line in `dlp-agent.log`.
+1. **USB block** — copy any file to a removable drive via Explorer → blocked; right-click a file → **"Transfer to USB (DLP Protected)"** → the TransferAgent scans it → ALLOW for clean, BLOCK for a CCCD/Visa-with-context file. The results **Note** column now shows a human reason — the policy's `user_message` on a policy block (e.g. *"Phát hiện số CCCD/CMND"*), or a friendly failure reason (e.g. *"Định dạng tệp không được hỗ trợ"* for an unsupported type) — instead of the file hash.
+2. **Browser** — upload the test file via Google Drive / Gmail → BLOCK shows a popup on your desktop carrying the reason **and** an instruction to reload the page and stop the upload (a blocked upload surfaces in Drive as a "network error" and otherwise retries); clean upload proceeds.
+3. **Clipboard** — copy text containing a card+context → blocked, and the clipboard is replaced with `[DLP] Đã chặn: <reason>`. Re-copy normal text → restored/allowed (the replacement text is excluded from re-analysis, so it cannot loop). **Large text:** copy the *entire* contents of a big text file (e.g. a ~7 MB `.txt`) — it is analyzed in full and blocked/allowed on its content, **not** rejected for size. The size gate is `clipboard.max_input_bytes` in `config.yaml` (default **8 MB**); raise it to allow bigger copies, but keep it within `service.analysis_timeout_seconds` (a near-cap copy must finish analysis in time or it fails closed).
+4. **Audit** — confirm a line per decision in `events.jsonl` (a BLOCK line carries a `reason` category — see §A.9) and a BLOCK/ALLOW line in `dlp-agent.log`.
+5. **Failure mode** — every channel has a `failure_mode` (`fail_closed` → BLOCK, the default; `fail_open` → ALLOW) that decides the verdict when analysis can't complete (oversize input, timeout, analysis error, the new **unsupported file type**, or — for the clients — the orchestrator pipe being unreachable). Quick demo via the oversize path: set `clipboard.max_input_bytes: 100` in `config.yaml`, `dlp-ctl reload`, then copy any longer text → **BLOCK** (`reason=size_limit` in `dlp-agent.log`); now add `clipboard.failure_mode: fail_open`, `dlp-ctl reload`, copy again → **ALLOW**. Restore the values + reload when done. (The orchestrator-side failure modes are also covered automatically by `scripts\harness\test_failure_mode.py`.) **Unsupported formats:** only the extensions in `analyzer.supported_extensions` (the 8 tested formats — `docx/odt/ods/xlsx/csv/txt/md/pdf` — plus textual `tsv/json/yaml/yml/log`) are scanned; any other type with an **explicit** extension (e.g. `.pptx`, `.exe`, an image) is refused with `reason=unsupported_format` and follows `failure_mode`. A file with **no** extension is **not** refused — it is analyzed as plaintext (some upload paths, notably **Gmail**, strip the extension and deliver every file as `upload`, so blocking on a missing extension would block legitimate `.txt`/`.csv`/`.md` uploads). This list applies at **service restart** (not `dlp-ctl reload`). **Behavior change:** the **browser** channel now defaults to `fail_closed`, so uploads are **blocked** if the orchestrator is unreachable (previously fail-open).
 
 > ⚠️ **NOT PRE-TESTED** in this session (needs the installed agent on a machine with a removable drive + browser). These mirror the VM end-to-end checks in §B.3.
 
@@ -279,7 +280,7 @@ Make a test file/text that contains **both** a matching number **and** a context
 | Path | Contents |
 |---|---|
 | `C:\ProgramData\DLP\logs\dlp-agent.log` | Main log: startup, BLOCK/ALLOW decision lines (with `elapsed_ms` + `policy_id(action)×N`), reloads, errors. |
-| `C:\ProgramData\DLP\logs\events.jsonl` | **Structured audit** — one JSON line per decision: `ts, req_id, channel, kind, decision, violations:[{policy_id,count}], elapsed_ms, superseded, name, url` (URL query-stripped). |
+| `C:\ProgramData\DLP\logs\events.jsonl` | **Structured audit** — one JSON line per decision: `ts, req_id, channel, kind, decision, violations:[{policy_id,count}], elapsed_ms, superseded, name, url` (URL query-stripped), and `reason` on a BLOCK — a stable category token (`policy_violation` / `oversize` / `text_cap` / `unsupported_format` / `timeout` / `analysis_error` / `malformed`) so a block's cause is unambiguous (cf. ECS `event.reason`). |
 | `C:\ProgramData\DLP\logs\supervisor-{mitmdump,clipboard,controller}.log` | Per-child process output. |
 | `C:\ProgramData\DLP\state\` | `install_manifest.json`, `installed_ca.txt`, `proxy_backup*.json`. |
 | `C:\ProgramData\DLP\mitmproxy\` | Generated mitmproxy CA (trusted into LocalMachine\Root by install). |
@@ -352,7 +353,7 @@ dlp-ctl tail --follow     # live events.jsonl
 - Input policies: `C:\Program Files\DLP\analyzer\policies.yaml` (edit + `dlp-ctl reload` to change what's blocked).
 - Output: `C:\ProgramData\DLP\logs\dlp-agent.log` and `events.jsonl` (locations identical to §A.9).
 
-Run through: USB copy block + "Transfer to USB" agent; Google-Drive/Gmail upload block (popup on the user desktop) + clean upload; clipboard text block; confirm `events.jsonl` lines (with `{policy_id,count}` violations and a query-stripped URL). Test across an **admin** and a **standard (non-admin)** user session (fast-user-switch) — each gets its own interceptors; the non-admin session's `dlp-ctl status` should be **denied** (admin-pipe is Administrators-only).
+Run through: USB copy block + "Transfer to USB" agent; Google-Drive/Gmail upload block (popup on the user desktop) + clean upload; clipboard text block — **including a large ~7 MB copy** (analyzed in full, not size-rejected) and the `failure_mode` oversize demo from §A.8 (steps 3 & 5); confirm `events.jsonl` lines (with `{policy_id,count}` violations and a query-stripped URL). Test across an **admin** and a **standard (non-admin)** user session (fast-user-switch) — each gets its own interceptors; the non-admin session's `dlp-ctl status` should be **denied** (admin-pipe is Administrators-only).
 
 Reboot the VM → the service should **auto-start** (no manual start needed).
 
@@ -375,4 +376,9 @@ Reboot the VM → the service should **auto-start** (no manual start needed).
 | Logs | n/a (not run from source) | `C:\ProgramData\DLP\logs\` | `tmp\harness\<uuid>\DLP\logs\` |
 | Apply policy/config edits | rebuild/reinstall to apply | save (auto) or `dlp-ctl reload` | n/a |
 
-`config.yaml` sections: `data_pipe`/`ctl_pipe`/`admin_pipe` (named pipes), `pools` (worker counts), `limits`, `supervisor` (restart policy), `service.drain_timeout_seconds`, `paths` (artifact locations — **Debug** by default), `proxy`, `policies_file`, `install` (`install_root`, `service_start_type: auto`, …), and per-component sections `clipboard` / `browser` / `peripheral_storage`. **Policy rules live separately in `analyzer/policies.yaml`** (policy ≠ config).
+`config.yaml` sections: `data_pipe`/`ctl_pipe`/`admin_pipe` (named pipes), `pools` (worker counts), `limits.max_file_bytes` (browser upload cap), `analyzer.max_extracted_chars`, `analyzer.supported_extensions` (file types the analyzer scans; others → `unsupported_format` + `failure_mode`; restart to apply), `supervisor` (restart policy), `service` (`drain_timeout_seconds`, `analysis_timeout_seconds`), `paths` (artifact locations — **Debug** by default), `proxy`, `policies_file`, `install` (`install_root`, `service_start_type: auto`, …), and per-component sections, each read only by its own client:
+- `clipboard` — `max_input_bytes` (copied-text cap), `pipe_timeout_ms`, `failure_mode`.
+- `browser` — `pipe_timeout_ms`, `failure_mode` (default `fail_closed`). The upload filters (`extensions`/`mime_types`/`domain_blocklist`/`upload_url_keywords`), `min_upload_size_bytes`, and `temp_dir` are **hardcoded** in `interceptors/browser/config.py` (rarely changed; not admin-exposed — `temp_dir` resolves to the system `%TEMP%`).
+- `peripheral_storage` split into `controller:` (the DLL-injector/`NtCreateFile` hook — `failure_mode`, `target_processes`, `shared_memory_name`, `payload_dll_path`, `in_user_session`) and `transfer_agent:` (`connect_timeout_ms`, `analysis_timeout_ms`, `failure_mode`).
+
+`failure_mode` (`fail_closed`→BLOCK default | `fail_open`→ALLOW) is unified across channels for every analysis/pipe failure. **Policy rules live separately in `analyzer/policies.yaml`** (policy ≠ config). Each policy may set a `user_message:` — the end-user block reason shown on the browser popup, the clipboard replacement text, and the Transfer Agent Note (the policy `id` is never shown). It is hot-reloadable via `dlp-ctl reload`. Failure-mode blocks (timeout/oversize/unsupported/…) instead show a per-category message defined in `orchestrator/messages.py`.

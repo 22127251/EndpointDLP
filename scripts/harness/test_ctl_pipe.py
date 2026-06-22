@@ -3,7 +3,7 @@
 (a) Subscribe with snapshot_request returns a config_snapshot matching the
     spawned orchestrator's config.yaml.
 (b) Saving the yaml with ONE non-hot-reloadable field (data_pipe) AND TWO
-    hot-reloadable fields (browser.fail_behavior + clipboard.pipe_timeout_ms)
+    hot-reloadable fields (browser.failure_mode + clipboard.pipe_timeout_ms)
     in a single atomic save results in:
       - a single config_update arriving to each subscriber within ~1.5 s,
       - the data_pipe field overridden back to the in-use value,
@@ -145,8 +145,8 @@ def test_subscribe_returns_snapshot(make_orchestrator):
         assert config["data_pipe"] == orch.pipe_name
         assert config["ctl_pipe"] == ctl_pipe
         # Browser section reflects what's on disk.
-        assert config["browser"]["pipe_timeout_seconds"] == raw["browser"]["pipe_timeout_seconds"]
-        assert config["browser"]["fail_behavior"] == raw["browser"]["fail_behavior"]
+        assert config["browser"]["pipe_timeout_ms"] == raw["browser"]["pipe_timeout_ms"]
+        assert config["browser"]["failure_mode"] == raw["browser"]["failure_mode"]
     finally:
         win32file.CloseHandle(handle)
 
@@ -156,7 +156,7 @@ def test_yaml_save_selective_skip_and_propagate(make_orchestrator):
     raw = yaml.safe_load(orch.config_path.read_text(encoding="utf-8"))
     ctl_pipe = raw["ctl_pipe"]
     old_data_pipe = raw["data_pipe"]
-    old_fail = raw["browser"]["fail_behavior"]
+    old_fail = raw["browser"]["failure_mode"]
     old_clip_timeout = raw["clipboard"]["pipe_timeout_ms"]
 
     browser_handle, browser_snap = _subscribe(ctl_pipe, "browser")
@@ -164,14 +164,14 @@ def test_yaml_save_selective_skip_and_propagate(make_orchestrator):
 
     try:
         # Sanity-check snapshots match starting state.
-        assert browser_snap["config"]["browser"]["fail_behavior"] == old_fail
+        assert browser_snap["config"]["browser"]["failure_mode"] == old_fail
         assert clipboard_snap["config"]["clipboard"]["pipe_timeout_ms"] == old_clip_timeout
 
         # Mutate one non-hot-reloadable + two hot-reloadable fields in one save.
-        new_fail = "allow" if old_fail == "block" else "block"
+        new_fail = "fail_open" if old_fail == "fail_closed" else "fail_closed"
         new_clip_timeout = old_clip_timeout + 1000
         raw["data_pipe"] = r"\\.\pipe\dlp_changed_should_not_apply"
-        raw["browser"]["fail_behavior"] = new_fail
+        raw["browser"]["failure_mode"] = new_fail
         raw["clipboard"]["pipe_timeout_ms"] = new_clip_timeout
         _atomic_write_yaml(orch.config_path, raw)
 
@@ -186,7 +186,7 @@ def test_yaml_save_selective_skip_and_propagate(make_orchestrator):
         assert clipboard_update["config"]["data_pipe"] == old_data_pipe, clipboard_update
 
         # Hot-reloadable changes propagated.
-        assert browser_update["config"]["browser"]["fail_behavior"] == new_fail, browser_update
+        assert browser_update["config"]["browser"]["failure_mode"] == new_fail, browser_update
         assert clipboard_update["config"]["clipboard"]["pipe_timeout_ms"] == new_clip_timeout, clipboard_update
     finally:
         win32file.CloseHandle(browser_handle)

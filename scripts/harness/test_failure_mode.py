@@ -18,6 +18,8 @@ import pytest
 
 from pipe_helpers import pipe_send
 
+from orchestrator import messages
+
 _CHANNELS = ("clipboard", "browser", "peripheral_storage")
 
 # config_overrides flipping every channel to fail_open (peripheral via its nested
@@ -67,7 +69,10 @@ def test_analysis_error_follows_failure_mode(make_orchestrator, fail_open, expec
         policies_fixture="permissive.yaml",
         config_overrides=(_FAIL_OPEN if fail_open else None),
     )
-    missing = str(orch.tmp_dir / f"does-not-exist-{uuid.uuid4().hex}.bin")
+    # Use a SUPPORTED extension (.pdf) so the missing file reaches os.path.getsize
+    # → FileNotFoundError → the analysis-error path (a .bin would be short-circuited
+    # by the supported-format gate, which is exercised in test_supported_format.py).
+    missing = str(orch.tmp_dir / f"does-not-exist-{uuid.uuid4().hex}.pdf")
     for channel in _CHANNELS:
         decision = _send(orch, channel, kind="file", file_path=missing)
         assert decision == expected, f"{channel}: expected {expected}, got {decision!r}"
@@ -109,3 +114,32 @@ def test_timeout_follows_failure_mode(make_orchestrator, fail_open, expected):
     for channel in _CHANNELS:
         decision = _send(orch, channel, text="anything", timeout=8.0)
         assert decision == expected, f"{channel}: expected {expected}, got {decision!r}"
+
+
+# --------------------------- friendly messages ---------------------------- #
+# A fail_closed BLOCK now carries the per-category end-user message (the text the
+# browser popup / clipboard / Transfer Agent Note shows), not a policy id or a
+# stale "Analysis timed out". Verify each category's message reaches the client.
+
+def test_oversize_block_carries_friendly_message(make_orchestrator):
+    orch = make_orchestrator(
+        policies_fixture="permissive.yaml",
+        config_overrides={"limits": {"max_clipboard_bytes": 4}},
+    )
+    decision, reason = pipe_send(
+        orch.pipe_name, {"channel": "browser", "kind": "text",
+                         "text": "well over the 4-byte cap", "metadata": {}},
+        timeout_seconds=8.0)
+    assert decision == "BLOCK"
+    assert reason == messages.FAILURE_MESSAGES["oversize"]
+
+
+def test_analysis_error_block_carries_friendly_message(make_orchestrator):
+    orch = make_orchestrator(policies_fixture="permissive.yaml")
+    missing = str(orch.tmp_dir / f"missing-{uuid.uuid4().hex}.pdf")
+    decision, reason = pipe_send(
+        orch.pipe_name, {"channel": "browser", "kind": "file",
+                         "file_path": missing, "metadata": {}},
+        timeout_seconds=8.0)
+    assert decision == "BLOCK"
+    assert reason == messages.FAILURE_MESSAGES["analysis_error"]

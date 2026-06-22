@@ -9,6 +9,7 @@ import uuid
 import pywintypes
 import win32file
 import win32pipe
+import winerror
 
 from orchestrator.config import OrchestratorConfig
 from orchestrator.dispatcher import Dispatcher
@@ -110,12 +111,44 @@ class PipeServer:
 
             self._handle_connection(handle)
 
+    def _read_message(self, handle) -> bytes | None:
+        """Read one whole message off the MESSAGE-mode pipe, reassembling fragments.
+
+        A single ReadFile returns at most ``_BUFFER`` bytes; for a message larger
+        than the buffer pywin32 returns ``hr == ERROR_MORE_DATA`` with the partial
+        bytes (it does NOT raise — confirmed by spike), so we loop until the message
+        is complete (``hr == 0``). This is what lets the clipboard channel carry
+        large inline text (``clipboard.max_input_bytes``); browser/peripheral send
+        tiny ``file_path`` messages that complete in one read.
+
+        Memory is bounded by an abuse ceiling derived from the clipboard cap (the
+        only channel that sends large inline text) — a JSON envelope around at-cap
+        text plus headroom for escaping. A message past the ceiling returns None;
+        the caller closes the handle, so the client fails per its own failure_mode.
+        """
+        ceiling = max(self._config.max_clipboard_bytes, _BUFFER) * 2 + (1 << 20)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            try:
+                hr, data = win32file.ReadFile(handle, _BUFFER)
+            except Exception as exc:
+                log.warning("ReadFile failed: %s", exc)
+                return None
+            chunks.append(data)
+            total += len(data)
+            if total > ceiling:
+                log.warning("oversize pipe message total=%d > ceiling=%d — dropping",
+                            total, ceiling)
+                return None
+            if hr != winerror.ERROR_MORE_DATA:  # hr == 0 → message complete
+                break
+        return b"".join(chunks)
+
     def _handle_connection(self, handle) -> None:
         """Read one request, analyze it, write the response, close the handle."""
-        try:
-            _, data = win32file.ReadFile(handle, _BUFFER)
-        except Exception as exc:
-            log.warning("ReadFile failed: %s", exc)
+        data = self._read_message(handle)
+        if data is None:
             _close_pipe(handle)
             return
 

@@ -2,5 +2,5 @@ namespace AgentCore;
 
 public interface IAgentCore
 {
-    Task<AnalysisDecision> AnalyseAsync(string content, CancellationToken cancellationToken = default);
+    Task<AnalysisOutcome> AnalyseAsync(string content, CancellationToken cancellationToken = default);
 }

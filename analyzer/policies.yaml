@@ -12,6 +12,9 @@ policies:
   # --- Thẻ VISA: có ngữ cảnh → BLOCK, chỉ đúng định dạng → ghi log ---
   - id: block_visa_all_channels
     name: Block Visa Card (confidence-scored)
+    # user_message: shown to the end user on a block (browser popup, clipboard
+    # replacement text, Transfer Agent Note). Never shows the policy id.
+    user_message: "Phát hiện số thẻ tín dụng (Visa)"
     channels: [browser, clipboard, peripheral_storage]
     type: regex
     patterns:
@@ -35,6 +38,7 @@ policies:
   #     (gộp cả bản "clipboard không cần ngữ cảnh" cũ: nay là dải điểm no-context)
   - id: block_cccd_all_channels
     name: Block Vietnamese Citizen ID CCCD (confidence-scored)
+    user_message: "Phát hiện số CCCD/CMND"
     channels: [browser, clipboard, peripheral_storage]
     type: regex
     patterns:
@@ -58,6 +62,9 @@ policies:
   # --- Số điện thoại: chính sách giám sát → luôn allow_log (context_word vẫn ghi nhận) ---
   - id: log_phone_numbers
     name: Log Phone Numbers (confidence-scored)
+    # allow_log only (never blocks) — user_message is here for completeness in
+    # case an admin raises it to a block action.
+    user_message: "Phát hiện số điện thoại"
     channels: [browser, clipboard, peripheral_storage]
     type: regex
     patterns:
@@ -83,6 +90,7 @@ policies:
   #     context_words dưới đây chỉ là VÍ DỤ minh họa, admin tự điều chỉnh.
   - id: block_confidential_keywords
     name: Block Confidential Keywords (confidence-scored)
+    user_message: "Phát hiện từ khóa tài liệu mật/nội bộ"
     channels: [browser, peripheral_storage]
     type: denylist
     keywords:

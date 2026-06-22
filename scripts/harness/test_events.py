@@ -20,17 +20,23 @@ def _cfg():
 
 
 class _Violation:
-    def __init__(self, policy_id: str, action: str = "block", context_words=None) -> None:
+    def __init__(self, policy_id: str, action: str = "block", context_words=None,
+                 user_message: str = "") -> None:
         self.policy_id = policy_id
         self.action = action
         self.context_words = context_words or []
         self.matches = ["m"]
+        self.user_message = user_message
 
 
 class _StubPM:
-    """analyze() returns a fixed (decision, violations) tuple."""
+    """analyze() returns a fixed (decision, violations, failure) tuple.
+
+    failure is the failure category (or None for a completed analysis) added when
+    PolicyManager.analyze grew its third element; tests pass 2-tuples too and they
+    are padded with None for convenience."""
     def __init__(self, result) -> None:
-        self._result = result
+        self._result = result if len(result) == 3 else (*result, None)
 
     def analyze(self, channel, kind, text=None, file_path=None, req_id=""):
         return self._result
@@ -81,20 +87,33 @@ def test_browser_allow_event(events_capture):
 
 
 def test_browser_block_event_has_violation_ids(events_capture):
-    disp = Dispatcher(_cfg(), _StubPM(("BLOCK", [_Violation("block_visa_browser")])))
+    disp = Dispatcher(_cfg(), _StubPM(("BLOCK", [
+        _Violation("block_visa_browser", user_message="Phát hiện số thẻ tín dụng (Visa)")])))
     req = {"channel": "browser", "kind": "file", "file_path": r"C:\x\f.pdf",
            "metadata": {"filename": "f.pdf"}, "req_id": "r2"}
     decision, write, reason = disp.analyze(req)
     assert decision == "BLOCK"
     assert write is True
-    assert reason.startswith("Sensitive data detected")
+    # The user-facing reason is the policy's user_message — never the policy id.
+    assert reason == "Phát hiện số thẻ tín dụng (Visa)"
+    assert "block_visa_browser" not in reason
     rec = json.loads(events_capture[0])
     assert rec["decision"] == "BLOCK"
+    assert rec["reason"] == "policy_violation"   # machine category in the audit log
     # violations are {policy_id, count, action, with_context, context_words} objects;
     # _Violation has matches=["m"] (no has_context) → count 1, with_context 0.
     assert rec["violations"] == [
         {"policy_id": "block_visa_browser", "count": 1, "action": "block",
          "with_context": 0, "context_words": []}]
+
+
+def test_browser_block_no_user_message_falls_back_to_generic(events_capture):
+    # A policy with no user_message → the generic fallback, still never the id.
+    disp = Dispatcher(_cfg(), _StubPM(("BLOCK", [_Violation("block_x")])))
+    req = {"channel": "browser", "kind": "file", "file_path": r"C:\x\f.pdf",
+           "metadata": {"filename": "f.pdf"}, "req_id": "r2b"}
+    _, _, reason = disp.analyze(req)
+    assert reason and "block_x" not in reason
 
 
 def test_browser_url_query_stripped(events_capture):
@@ -109,15 +128,18 @@ def test_browser_url_query_stripped(events_capture):
     assert "?" not in rec["url"] and "key=" not in rec["url"]
 
 
-def test_peripheral_block_keeps_empty_client_reason(events_capture):
-    # Peripheral never sent a reason to the client; that must be preserved, but
-    # the event still records the violation ids.
-    disp = Dispatcher(_cfg(), _StubPM(("BLOCK", [_Violation("block_cccd")])))
+def test_peripheral_block_now_sends_reason(events_capture):
+    # Peripheral now DOES send a reason to the client (the Transfer Agent Note
+    # shows it instead of the file hash). The event records the category +
+    # violation ids.
+    disp = Dispatcher(_cfg(), _StubPM(("BLOCK", [
+        _Violation("block_cccd", user_message="Phát hiện số CCCD/CMND")])))
     req = {"channel": "peripheral_storage", "kind": "file",
            "file_path": r"C:\x\id.docx", "req_id": "r3"}
-    assert disp.analyze(req) == ("BLOCK", True, "")
+    assert disp.analyze(req) == ("BLOCK", True, "Phát hiện số CCCD/CMND")
     rec = json.loads(events_capture[0])
     assert rec["channel"] == "peripheral_storage"
+    assert rec["reason"] == "policy_violation"
     assert rec["violations"] == [
         {"policy_id": "block_cccd", "count": 1, "action": "block",
          "with_context": 0, "context_words": []}]
@@ -150,7 +172,7 @@ class _GatedClipPM:
         if n == 0:
             self.first_started.set()
             self.gate.wait(timeout=5)
-        return ("ALLOW", [])
+        return ("ALLOW", [], None)
 
 
 def test_clipboard_supersession_event(events_capture):
@@ -183,7 +205,7 @@ def test_inflight_counts_and_drain():
 
     def _slow(*a, **k):
         gate.wait(timeout=5)
-        return ("ALLOW", [])
+        return ("ALLOW", [], None)
 
     disp = Dispatcher(_cfg(), SimpleNamespace(analyze=_slow))
     assert disp.inflight_counts() == {

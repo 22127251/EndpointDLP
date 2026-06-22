@@ -22,6 +22,12 @@ class Policy:
     keywords: list[str]      # non-empty when type == "denylist"
     context_words: list[str]
     context_range: int
+    # End-user-facing block reason shown on the browser popup, the clipboard
+    # replacement text, and the Transfer Agent Note column. Kept separate from
+    # `name` (an admin/log label) and from `id` (which must never be shown — it
+    # is insecure and reads as gibberish if randomized). Empty → the dispatcher
+    # falls back to messages.GENERIC_POLICY_MESSAGE.
+    user_message: str = ""
     # --- Confidence-scoring (the ONLY action mechanism) ------------------
     # A shape match is always detected + counted. Context (a context_word found
     # nearby/in-cell/header/row) RAISES the score; it never drops a match. The
@@ -58,6 +64,7 @@ def load_policies(yaml_path: str | Path) -> list[Policy]:
         policies.append(Policy(
             id=entry["id"],
             name=entry["name"],
+            user_message=str(entry.get("user_message", "")),
             channels=list(entry.get("channels", [])),
             type=entry["type"],
             patterns=list(entry.get("patterns", [])),

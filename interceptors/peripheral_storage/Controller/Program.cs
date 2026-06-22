@@ -22,7 +22,8 @@ internal static class Program
             yamlPath = ConfigLocator.FindConfigYaml();
             var (_, ctlPipe) = ConfigLocator.LoadTopLevel(yamlPath);
             ctlPipeName = ctlPipe;
-            config = ConfigLocator.LoadSection<AppConfig>(yamlPath, "peripheral_storage");
+            // Phase 7: the Controller's settings moved under peripheral_storage.controller.
+            config = ConfigLocator.LoadSection<PeripheralStorageSection>(yamlPath, "peripheral_storage").Controller;
         }
         catch (Exception ex)
         {
@@ -32,7 +33,7 @@ internal static class Program
 
         Log.Write($"[Controller] Loaded central config: {yamlPath}");
         Log.Write($"[Controller] Targets: {string.Join(", ", config.TargetProcesses)}");
-        Log.Write($"[Controller] Fail mode: {config.FailMode}");
+        Log.Write($"[Controller] Failure mode: {config.FailureMode}");
 
         // Phase E: enable SeDebugPrivilege up front so injection works when the
         // Controller runs in Session 0 (LocalSystem service) and must reach a
@@ -129,7 +130,7 @@ internal static class Program
                 if (newConfig.FailClosed != currentConfig.FailClosed)
                 {
                     shmWriter.UpdateFailClosed(newConfig.FailClosed);
-                    Log.Write($"[Controller] fail_mode updated: {newConfig.FailMode}");
+                    Log.Write($"[Controller] failure_mode updated: {newConfig.FailureMode}");
                 }
 
                 if (!string.Equals(newConfig.PayloadDllPath, currentConfig.PayloadDllPath,
@@ -156,15 +157,16 @@ internal static class Program
         };
         var subscriber = new CtlPipeSubscriber(ctlPipeName, "controller", configPayload =>
         {
-            if (!configPayload.TryGetProperty("peripheral_storage", out var peripheral))
+            if (!configPayload.TryGetProperty("peripheral_storage", out var peripheral)
+                || !peripheral.TryGetProperty("controller", out var controller))
             {
-                Log.WriteError("[Controller] ctl push missing peripheral_storage section — ignoring");
+                Log.WriteError("[Controller] ctl push missing peripheral_storage.controller section — ignoring");
                 return;
             }
             AppConfig? newConfig;
             try
             {
-                newConfig = peripheral.Deserialize<AppConfig>(jsonOpts);
+                newConfig = controller.Deserialize<AppConfig>(jsonOpts);
             }
             catch (Exception ex)
             {

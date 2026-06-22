@@ -335,8 +335,10 @@ internal sealed class TransferForm : Form
                         : status is TransferStatus.Skipped ? Color.DarkOrange
                         : Color.DarkRed;
 
-            string note = result.ErrorMessage
-                ?? (result.FileHash is not null ? $"sha256:{result.FileHash[..16]}…" : "");
+            // Note = the human reason (policy user_message on a policy block, a
+            // friendly failure message, or a copy/skip detail). The SHA-256 hash
+            // is no longer shown — it carried no meaning for the end user.
+            string note = result.ErrorMessage ?? "";
 
             var item = new ListViewItem(displayName);
             item.SubItems.Add(statusText);

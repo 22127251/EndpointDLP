@@ -40,13 +40,21 @@ def record_decision(
     elapsed_ms: float,
     req_id: str,
     superseded: bool = False,
+    reason: str | None = None,
 ) -> None:
     """Emit one audit line. ``violations`` is a list of
     ``{"policy_id","count","action","with_context","context_words"}`` objects —
     count = matches for that policy, action = the strongest action it resolved to,
     with_context = how many matches had a confidence-boosting context word, and
     context_words = the distinct context words that triggered those boosts (generic
-    terms only — never the matched value)."""
+    terms only — never the matched value).
+
+    ``reason`` is the stable machine category behind a BLOCK — ``policy_violation``
+    for a real policy hit, or one of ``oversize`` / ``text_cap`` /
+    ``unsupported_format`` / ``timeout`` / ``analysis_error`` / ``malformed`` for a
+    failure-mode block. It mirrors Elastic ECS ``event.reason`` / OCSF
+    ``status_detail`` so a reader can tell WHY a request was blocked (an
+    empty-``violations`` BLOCK was previously ambiguous). Omitted on ALLOW."""
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     rec: dict = {
         "ts": ts,
@@ -58,6 +66,8 @@ def record_decision(
         "elapsed_ms": round(elapsed_ms, 1),
         "superseded": superseded,
     }
+    if reason:
+        rec["reason"] = reason
     if name:
         rec["name"] = name
     if url:

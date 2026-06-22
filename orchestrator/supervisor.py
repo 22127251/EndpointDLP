@@ -613,8 +613,15 @@ def build_default_specs(config: OrchestratorConfig, repo_root: Path) -> list[Chi
 
     # Phase E: Controller placement comes from config (E0 spike result). false →
     # Session 0 (Option A, default); true → per user session (Option B).
+    # Phase 7: this lives under peripheral_storage.controller.in_user_session; fall
+    # back to the old top-level peripheral_storage.controller_in_user_session key.
+    _peripheral = config.raw.get("peripheral_storage") or {}
+    _controller = _peripheral.get("controller") or {}
     controller_in_user_session = bool(
-        (config.raw.get("peripheral_storage") or {}).get("controller_in_user_session", False)
+        _controller.get(
+            "in_user_session",
+            _peripheral.get("controller_in_user_session", False),
+        )
     )
 
     return [

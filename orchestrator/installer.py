@@ -698,8 +698,9 @@ def build_bundle_config(src_config_path: str | Path, dest_config_path: str | Pat
         points at ``python-embed/Scripts/mitmdump.exe``, the bundle's embed dir),
       - ``paths.log_dir`` → "" (so it defaults to %PROGRAMDATA%\\DLP\\logs on the VM),
       - ``policies_file`` → ``analyzer/policies.yaml``,
-      - ``browser.temp_dir`` → "" (the only host-absolute setting; "" → system %TEMP%),
       - ``install.install_root`` → "" (so it defaults to %ProgramFiles%\\DLP).
+    (browser.temp_dir is no longer a config key — it is hardcoded to the system
+    %TEMP% in interceptors/browser/config.py — so nothing to neutralize here.)
     Everything else is copied verbatim, so new config sections flow through.
     """
     src = Path(src_config_path)
@@ -713,11 +714,6 @@ def build_bundle_config(src_config_path: str | Path, dest_config_path: str | Pat
     raw["paths"] = paths
 
     raw["policies_file"] = "analyzer/policies.yaml"
-
-    browser = dict(raw.get("browser") or {})
-    if "temp_dir" in browser or browser:
-        browser["temp_dir"] = ""        # host-absolute → neutralize to system %TEMP%
-        raw["browser"] = browser
 
     install_section = dict(raw.get("install") or {})
     install_section["install_root"] = ""

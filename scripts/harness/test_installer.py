@@ -53,8 +53,7 @@ def test_build_bundle_config_rewrites_for_vm(tmp_path: Path) -> None:
             "log_dir": "D:/somewhere/logs",
         },
         "policies_file": "analyzer/policies.yaml",
-        "browser": {"temp_dir": r"D:\Code\GithubPublishEndpointDLP\tmp",
-                    "pipe_timeout_seconds": 5},
+        "browser": {"pipe_timeout_ms": 12000},
         "install": {"install_root": "C:/old", "service_name": "DLPAgent"},
         "peripheral_storage": {"target_processes": ["explorer.exe"]},
         "app_control": {"enabled": True, "poll_seconds": 3},
@@ -70,11 +69,12 @@ def test_build_bundle_config_rewrites_for_vm(tmp_path: Path) -> None:
     assert out["paths"]["shell_extension_dll"] == "bin/ShellExt/DlpShellExt.dll"
     assert out["paths"]["mitmdump_exe"] == "python-embed/Scripts/mitmdump.exe"
     assert out["paths"]["log_dir"] == ""
-    # host-absolute settings neutralized
-    assert out["browser"]["temp_dir"] == ""
+    # host-absolute settings neutralized (browser.temp_dir is no longer a config
+    # key — it is hardcoded to system %TEMP% in interceptors/browser/config.py)
     assert out["install"]["install_root"] == ""
+    assert "temp_dir" not in out.get("browser", {})
     # unrelated values copied verbatim
-    assert out["browser"]["pipe_timeout_seconds"] == 5
+    assert out["browser"]["pipe_timeout_ms"] == 12000
     assert out["peripheral_storage"]["target_processes"] == ["explorer.exe"]
     assert out["data_pipe"] == "p"
     # AC-5 (D5): the app_control section flows into the bundle untouched, so the
