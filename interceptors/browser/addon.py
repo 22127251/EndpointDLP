@@ -1259,8 +1259,8 @@ def _notify_blocked(filename: str, reason: str) -> None:
             # The upload was 403'd. Google Drive (and similar) surface that 403 as
             # a generic "network error" and keep retrying, so the user must stop
             # the upload themselves and reload the page — tell them explicitly.
-            guidance = ("Hành động: Vui lòng TẢI LẠI (refresh) trang web và NGỪNG/HỦY "
-                        "tải tệp này. Tệp bị chặn có thể khiến trình duyệt báo lỗi mạng.")
+            guidance = ("Action: Please RELOAD (refresh) the page and STOP/CANCEL this "
+                        "upload. A blocked file may cause the browser to report a network error.")
             header = f"File: {filename}" if not reason else f"File: {filename}\nReason: {reason}"
             msg = f"{header}\n\n{guidance}"
             kernel32 = ctypes.windll.kernel32

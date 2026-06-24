@@ -17,28 +17,27 @@ The dispatcher maps an outcome to one ``category`` token (logged to
 ``category → message`` half. The category tokens are the same strings the
 dispatcher records, so the audit log and the user message stay in lock-step.
 
-Default language is Vietnamese (the endpoint users); edit the strings here to
-re-word or localize.
+Default language is English; edit the strings here to re-word or localize.
 """
 from __future__ import annotations
 
 # Generic fallback when a matched block policy has no ``user_message`` set.
-GENERIC_POLICY_MESSAGE = "Phát hiện dữ liệu nhạy cảm"
+GENERIC_POLICY_MESSAGE = "Sensitive data detected"
 
 # category token -> end-user message. Keys mirror the dispatcher's event `reason`
 # tokens for the analysis-failure paths (policy_violation is handled separately,
 # from the policy's own user_message).
 FAILURE_MESSAGES: dict[str, str] = {
-    "oversize": "Tệp vượt quá kích thước cho phép",
-    "text_cap": "Tệp quá lớn để quét nội dung",
-    "unsupported_format": "Định dạng tệp không được hỗ trợ",
-    "timeout": "Quá thời gian quét, vui lòng thử lại",
-    "analysis_error": "Không thể quét tệp",
-    "malformed": "Yêu cầu không hợp lệ",
+    "oversize": "File exceeds the maximum allowed size",
+    "text_cap": "Content is too large to scan",
+    "unsupported_format": "File type is not supported",
+    "timeout": "Scan timed out, please try again",
+    "analysis_error": "Unable to scan the content",
+    "malformed": "Invalid request",
 }
 
 # Last-resort message if an unknown category ever reaches here.
-_UNKNOWN_FAILURE_MESSAGE = "Không thể quét tệp"
+_UNKNOWN_FAILURE_MESSAGE = "Unable to scan the content"
 
 
 def failure_message(category: str) -> str:

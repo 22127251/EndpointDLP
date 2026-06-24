@@ -41,19 +41,23 @@ def _send(orch, channel, *, kind="text", text=None, file_path=None, timeout=8.0)
     return decision
 
 
-# ----------------------------- oversize ----------------------------------- #
-# A tiny max_clipboard_bytes makes any text request oversize, so the size-cap
-# short-circuit in policy_manager fires for every channel (kind=text shares the
-# clipboard byte cap). Verdict must follow failure_mode.
+# ----------------------------- oversize (file) ---------------------------- #
+# A tiny max_file_bytes makes any real file oversize BEFORE extraction, so the
+# size-cap short-circuit in policy_manager fires. (Clipboard TEXT no longer has a
+# byte cap — it is governed by analyzer.max_extracted_chars; see test_text_cap_*
+# and test_config_hot_reload_e2e.) Verdict must follow failure_mode. The oversized
+# temp file is deleted by policy_manager, so it is rewritten before each channel.
 
 @pytest.mark.parametrize("fail_open,expected", [(False, "BLOCK"), (True, "ALLOW")])
 def test_oversize_follows_failure_mode(make_orchestrator, fail_open, expected):
-    overrides = {"limits": {"max_clipboard_bytes": 4}}
+    overrides = {"limits": {"max_file_bytes": 4}}
     if fail_open:
         overrides.update(_FAIL_OPEN)
     orch = make_orchestrator(policies_fixture="permissive.yaml", config_overrides=overrides)
+    over_cap = orch.tmp_dir / "over_cap.txt"
     for channel in _CHANNELS:
-        decision = _send(orch, channel, text="well over the 4-byte cap")
+        over_cap.write_text("well over the 4-byte file cap", encoding="utf-8")
+        decision = _send(orch, channel, kind="file", file_path=str(over_cap))
         assert decision == expected, f"{channel}: expected {expected}, got {decision!r}"
 
 
@@ -124,11 +128,13 @@ def test_timeout_follows_failure_mode(make_orchestrator, fail_open, expected):
 def test_oversize_block_carries_friendly_message(make_orchestrator):
     orch = make_orchestrator(
         policies_fixture="permissive.yaml",
-        config_overrides={"limits": {"max_clipboard_bytes": 4}},
+        config_overrides={"limits": {"max_file_bytes": 4}},
     )
+    over_cap = orch.tmp_dir / "over_cap.txt"
+    over_cap.write_text("well over the 4-byte file cap", encoding="utf-8")
     decision, reason = pipe_send(
-        orch.pipe_name, {"channel": "browser", "kind": "text",
-                         "text": "well over the 4-byte cap", "metadata": {}},
+        orch.pipe_name, {"channel": "browser", "kind": "file",
+                         "file_path": str(over_cap), "metadata": {}},
         timeout_seconds=8.0)
     assert decision == "BLOCK"
     assert reason == messages.FAILURE_MESSAGES["oversize"]

@@ -12,6 +12,27 @@ _DEFAULT_SUPPORTED_EXTENSIONS = [
     ".txt", ".md", ".pdf", ".json", ".yaml", ".yml", ".log",
 ]
 
+# Hard safety ceiling for the clipboard data-pipe message when the extracted-text
+# cap is disabled (analyzer.max_extracted_chars <= 0). The Windows clipboard is
+# otherwise memory-bound only (no hard size limit), so we still refuse a pipe
+# message beyond this to bound per-analysis memory. See clipboard_pipe_ceiling_bytes.
+_CLIPBOARD_UNCAPPED_CEILING_BYTES = 256 * 1024 * 1024
+
+# Flat OrchestratorConfig fields that take effect on a live config reload
+# (dlp-ctl reload / config.yaml save) — see apply_hot_reload. Every OTHER flat
+# field is restart-only (pipe names, worker pools, paths, proxy, policies_file,
+# supervisor.*, app_control.* — the channel hot-reloads its own poll/forward via
+# AppControlChannel.apply_config, NOT here). Keep in sync with the config-reload
+# classification test (scripts/harness/test_config_apply_hot_reload.py).
+_HOT_RELOADABLE_FIELDS = (
+    "failure_mode",
+    "max_file_bytes",
+    "max_extracted_chars",
+    "supported_extensions",
+    "analysis_timeout_seconds",
+    "drain_timeout_seconds",
+)
+
 
 def _normalize_extensions(raw_list) -> list:
     """Normalize a configured extension list to lowercase, leading-dot form
@@ -39,7 +60,6 @@ class OrchestratorConfig:
     browser_workers: int
     peripheral_storage_workers: int
     pipe_listeners: int
-    max_clipboard_bytes: int
     max_file_bytes: int
     max_restarts: int
     restart_window_seconds: int
@@ -119,13 +139,52 @@ class OrchestratorConfig:
         mode = (self.failure_mode or {}).get(channel, "fail_closed")
         return "ALLOW" if mode == "fail_open" else "BLOCK"
 
+    def clipboard_pipe_ceiling_bytes(self) -> int:
+        """Max bytes the data-pipe will reassemble for one (clipboard) message.
+        Derived from max_extracted_chars so it tracks hot-reloads: UTF-8 is at
+        most 4 bytes/char, + 1 MB headroom for the JSON envelope/escaping. With
+        the char-cap disabled (<=0), fall back to a fixed 256 MB safety bound
+        (the clipboard is otherwise memory-bound only). A message past the ceiling
+        is dropped by the server, so the client fails per its own failure_mode."""
+        cap = self.max_extracted_chars
+        if cap and cap > 0:
+            return cap * 4 + (1 << 20)
+        return _CLIPBOARD_UNCAPPED_CEILING_BYTES
+
+    def apply_hot_reload(self, new_raw: dict) -> list[str]:
+        """Re-apply the hot-reloadable fields (``_HOT_RELOADABLE_FIELDS``) from
+        *new_raw* onto THIS object in place — every consumer (PolicyManager /
+        Dispatcher / PipeServer) holds this instance by reference, so the in-place
+        swap is what makes a config reload take effect without a restart. Every
+        other (restart-only) field is left untouched. Returns the names of the
+        fields whose value actually changed (for logging).
+
+        Each assignment is a single attribute/reference set, which is atomic under
+        the GIL, so a worker thread reading concurrently sees either the old or the
+        new value — never a torn one. No extra lock is needed (matches the existing
+        lock-free reads in Dispatcher/PolicyManager)."""
+        fresh = _config_from_raw(new_raw)
+        changed: list[str] = []
+        for name in _HOT_RELOADABLE_FIELDS:
+            if getattr(self, name) != getattr(fresh, name):
+                setattr(self, name, getattr(fresh, name))
+                changed.append(name)
+        self.raw = new_raw
+        return changed
+
 
 def load_config(path: str | Path | None = None) -> OrchestratorConfig:
     if path is None:
         path = Path(__file__).parent.parent / "config.yaml"
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+    return _config_from_raw(raw)
 
+
+def _config_from_raw(raw: dict) -> OrchestratorConfig:
+    """Build an OrchestratorConfig from an already-parsed config dict. Shared by
+    load_config (file path) and apply_hot_reload (the watcher's new dict) so both
+    parse identically."""
     pools = raw.get("pools", {})
     limits = raw.get("limits", {})
     supervisor = raw.get("supervisor", {})
@@ -155,11 +214,6 @@ def load_config(path: str | Path | None = None) -> OrchestratorConfig:
         browser_workers=pools.get("browser_workers", 3),
         peripheral_storage_workers=pools.get("peripheral_storage_workers", 2),
         pipe_listeners=pools.get("pipe_listeners", 4),
-        # Phase 7: the clipboard text cap moved to clipboard.max_input_bytes (the
-        # section the ClipboardInterceptor reads). Fall back to the old
-        # limits.max_clipboard_bytes so pre-Phase-7 fixtures/configs still parse.
-        max_clipboard_bytes=clipboard_cfg.get(
-            "max_input_bytes", limits.get("max_clipboard_bytes", 8388608)),
         max_file_bytes=limits.get("max_file_bytes", 104857600),
         max_restarts=supervisor.get("max_restarts", 3),
         restart_window_seconds=supervisor.get("restart_window_seconds", 60),

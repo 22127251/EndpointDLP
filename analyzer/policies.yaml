@@ -14,7 +14,7 @@ policies:
     name: Block Visa Card (confidence-scored)
     # user_message: shown to the end user on a block (browser popup, clipboard
     # replacement text, Transfer Agent Note). Never shows the policy id.
-    user_message: "Phát hiện số thẻ tín dụng (Visa)"
+    user_message: "Credit card number (Visa) detected"
     channels: [browser, clipboard, peripheral_storage]
     type: regex
     patterns:
@@ -38,7 +38,7 @@ policies:
   #     (gộp cả bản "clipboard không cần ngữ cảnh" cũ: nay là dải điểm no-context)
   - id: block_cccd_all_channels
     name: Block Vietnamese Citizen ID CCCD (confidence-scored)
-    user_message: "Phát hiện số CCCD/CMND"
+    user_message: "Vietnamese Citizen ID (CCCD/CMND) detected"
     channels: [browser, clipboard, peripheral_storage]
     type: regex
     patterns:
@@ -64,7 +64,7 @@ policies:
     name: Log Phone Numbers (confidence-scored)
     # allow_log only (never blocks) — user_message is here for completeness in
     # case an admin raises it to a block action.
-    user_message: "Phát hiện số điện thoại"
+    user_message: "Phone number detected"
     channels: [browser, clipboard, peripheral_storage]
     type: regex
     patterns:
@@ -90,7 +90,7 @@ policies:
   #     context_words dưới đây chỉ là VÍ DỤ minh họa, admin tự điều chỉnh.
   - id: block_confidential_keywords
     name: Block Confidential Keywords (confidence-scored)
-    user_message: "Phát hiện từ khóa tài liệu mật/nội bộ"
+    user_message: "Confidential/internal document keyword detected"
     channels: [browser, peripheral_storage]
     type: denylist
     keywords:

@@ -148,7 +148,7 @@ def make_orchestrator():
             "ctl_pipe": ctl_pipe_name,
             "admin_pipe": admin_pipe_name,
             "pools": pools,
-            "limits": {"max_clipboard_bytes": 1048576, "max_file_bytes": 104857600},
+            "limits": {"max_file_bytes": 104857600},
             "supervisor": {
                 "max_restarts": 3,
                 "restart_window_seconds": 60,
@@ -193,7 +193,7 @@ def make_orchestrator():
         }
         # config_overrides deep-merges into the generated config so a test can set
         # nested keys (e.g. {"clipboard": {"failure_mode": "fail_open"}} or
-        # {"limits": {"max_clipboard_bytes": 4}}) without restating the whole tree.
+        # {"limits": {"max_file_bytes": 4}}) without restating the whole tree.
         if config_overrides:
             _deep_merge(config, config_overrides)
 

@@ -16,12 +16,11 @@ pools:
   pipe_listeners:             4
 
 limits:
-  max_file_bytes:      104857600     # 100 MB (browser upload cap)
-  # The clipboard text cap moved to clipboard.max_input_bytes (the section the
-  # ClipboardInterceptor itself reads). The per-channel verdict on an oversize
-  # input is folded into the unified `failure_mode` knob on each channel's own
-  # section (clipboard / browser / peripheral_storage.transfer_agent below) — one
-  # setting covers oversize, timeout, and analysis-error. Reason logged reason=size_limit.
+  max_file_bytes:      104857600     # 100 MB (browser upload cap; hot-reloadable)
+  # Clipboard copied TEXT has no separate byte cap — it is governed by
+  # analyzer.max_extracted_chars (over it → reason=text_cap). The per-channel verdict
+  # on a refused input (oversize file / text_cap / timeout / analysis-error) is the
+  # unified `failure_mode` knob on each channel's own section below.
 
 analyzer:
   # Cap on extracted text per file analysis (characters; ~2 bytes each in memory).
@@ -30,6 +29,8 @@ analyzer:
   # Over it → extraction is refused and the channel's failure_mode verdict applies,
   # logged reason=text_cap. ~16M chars ≈ a few hundred MB peak/analysis, which keeps
   # the 7-worker worst case ≈ 1 GB on the 8 GB VM. Set <=0 to disable the cap.
+  # ALSO governs clipboard copied TEXT (text longer than this → reason=text_cap →
+  # clipboard.failure_mode). Hot-reloadable (dlp-ctl reload / save applies it live).
   max_extracted_chars: 16000000
 
   # File extensions the analyzer is built + tested to extract and scan. A file
@@ -41,9 +42,9 @@ analyzer:
   # preserved). The list is the 8 tested
   # formats (docx/odt/ods/xlsx/csv/txt/md/pdf) plus clearly-textual fallbacks
   # (tsv/json/yaml/yml/log). Only the FILE channels (browser, peripheral_storage)
-  # consult it — clipboard text has no extension. Applied at service START (like
-  # max_extracted_chars; `dlp-ctl reload` does NOT re-read it). Matching is
-  # case-insensitive; a leading dot is added if omitted.
+  # consult it — clipboard text has no extension. Hot-reloadable (dlp-ctl reload /
+  # config.yaml save applies it live). Matching is case-insensitive; a leading dot
+  # is added if omitted.
   supported_extensions: [.docx, .odt, .ods, .xlsx, .csv, .tsv, .txt, .md, .pdf, .json, .yaml, .yml, .log]
 
 supervisor:                          # Consumed in Phase C; harmless to keep now.
@@ -91,16 +92,15 @@ install:
 # ── Per-component sections (each component reads ONLY its own subtree) ──
 
 clipboard:
-  # Cap on copied-text size sent for analysis (UTF-8 bytes). The ClipboardInterceptor
-  # rejects larger copies locally and the orchestrator rejects them server-side. Raise
-  # to allow bigger pastes, but keep it within the analysis budget
-  # (service.analysis_timeout_seconds): a near-cap paste must finish analysis in time
-  # or it fails closed.
-  max_input_bytes: 8388608           # 8 MB
+  # The ClipboardInterceptor now sends the FULL copied text — there is no client-side
+  # byte cap. Whether the text is scanned is governed by analyzer.max_extracted_chars:
+  # text longer than that is refused WITHOUT scanning (reason=text_cap) and follows
+  # failure_mode below. (The data pipe still bounds reassembly memory at a ceiling
+  # derived from max_extracted_chars; pathologically huge copies are dropped.)
   pipe_timeout_ms: 12000             # client wait > orchestrator analysis (10 s)
-  # Verdict on ANY failure for this channel — orchestrator-side (timeout / oversize /
-  # analysis-error) AND the client's own pipe/connect failure (Phase 7):
-  # fail_closed → BLOCK (default), fail_open → ALLOW.
+  # Verdict on ANY failure for this channel — orchestrator-side (timeout / text_cap /
+  # analysis-error) AND the client's own pipe/connect failure:
+  # fail_closed → BLOCK (default), fail_open → ALLOW. Hot-reloadable.
   failure_mode: fail_closed
 
 browser:                             # All fields migrated from interceptors/browser/config.yaml.

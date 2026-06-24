@@ -139,10 +139,17 @@ class PolicyManager:
             engine = self._engine  # snapshot — lock release/acquire orders strictly against reload
         if kind == "text":
             body = text or ""
-            nbytes = len(body.encode("utf-8", "ignore"))
-            cap = getattr(self._cfg, "max_clipboard_bytes", 1 << 60)
-            if nbytes > cap:
-                return self._oversize_verdict(channel, req_id, f"text bytes={nbytes} > cap={cap}")
+            # Clipboard text has no file to extract, so the analyzer's
+            # max_extracted_chars governs whether it is scanned (parity with the
+            # file-extraction cap). Over the cap → refuse without scanning
+            # (reason=text_cap) and follow the channel's failure_mode. <=0 disables
+            # the cap (scan everything the pipe accepts; see server.py ceiling).
+            cap_chars = self._cfg.max_extracted_chars
+            if cap_chars and cap_chars > 0 and len(body) > cap_chars:
+                decision = self._cfg.verdict_for(channel)
+                log.warning("reason=text_cap req=%s channel=%s text chars=%d > cap=%d -> %s",
+                            req_id, channel, len(body), cap_chars, decision)
+                return decision, [], "text_cap"
             result = engine.analyze(body, channel)
             content_label = (
                 f"size={len(body)} hash={hashlib.sha256(body.encode()).hexdigest()[:8]}"

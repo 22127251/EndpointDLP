@@ -131,7 +131,7 @@ internal static class OrchestratorClient
                 ? response[(bar + 1)..].Trim()
                 : string.Empty;
             if (reason.Length == 0)
-                reason = "Tệp bị chặn bởi chính sách bảo mật.";
+                reason = "File blocked by security policy.";
             if (reason.Length > 240)
                 reason = reason[..240];
             return new TransferResult(req.FilePath, false, reason, fileHash);

@@ -29,7 +29,7 @@ public sealed class ClipboardInterceptorService
     // re-analysis — the guard that keeps the dynamic block text from looping.
     private const string DlpMarker = "[DLP";
     private const string Placeholder = "[DLP: Analyzing...]";
-    private const string BlockFallback = "[DLP] Đã chặn nội dung";
+    private const string BlockFallback = "[DLP] Content blocked";
 
     private readonly IAgentCore _agentCore;
     private string? _allowRestoreText;
@@ -129,5 +129,5 @@ public sealed class ClipboardInterceptorService
     /// (so IsDlpAuthored excludes it). Carries the end-user reason when one was
     /// returned; otherwise a generic notice. Public for unit testing.</summary>
     public static string BuildBlockText(string? reason) =>
-        string.IsNullOrWhiteSpace(reason) ? BlockFallback : $"[DLP] Đã chặn: {reason}";
+        string.IsNullOrWhiteSpace(reason) ? BlockFallback : $"[DLP] Blocked: {reason}";
 }

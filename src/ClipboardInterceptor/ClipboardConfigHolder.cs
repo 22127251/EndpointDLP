@@ -1,30 +1,29 @@
 namespace ClipboardInterceptor;
 
 /// <summary>
-/// Thread-safe holder for the (pipe_name, timeout_ms, max_input_bytes, fail_open)
-/// tuple that PipeAgentCore's provider closes over. ctl-pipe pushes update the
-/// hot-reloadable fields in place; the data pipe name is non-hot-reloadable
-/// (decision #7) so it is the only immutable field.
+/// Thread-safe holder for the (pipe_name, timeout_ms, fail_open) tuple that
+/// PipeAgentCore's provider closes over. ctl-pipe pushes update the hot-reloadable
+/// fields in place; the data pipe name is non-hot-reloadable (decision #7) so it is
+/// the only immutable field. (The copied-text size cap was removed — the interceptor
+/// sends the full clipboard text and the analyzer governs it via max_extracted_chars.)
 /// </summary>
 internal sealed class ClipboardConfigHolder
 {
     private readonly object _lock = new();
     private readonly string _pipeName;
     private int _timeoutMs;
-    private int _maxInputBytes;
     private bool _failOpen;
 
-    public ClipboardConfigHolder(string pipeName, int timeoutMs, int maxInputBytes, bool failOpen)
+    public ClipboardConfigHolder(string pipeName, int timeoutMs, bool failOpen)
     {
         _pipeName = pipeName;
         _timeoutMs = timeoutMs;
-        _maxInputBytes = maxInputBytes;
         _failOpen = failOpen;
     }
 
-    public (string PipeName, int TimeoutMs, int MaxContentBytes, bool FailOpen) Get()
+    public (string PipeName, int TimeoutMs, bool FailOpen) Get()
     {
-        lock (_lock) return (_pipeName, _timeoutMs, _maxInputBytes, _failOpen);
+        lock (_lock) return (_pipeName, _timeoutMs, _failOpen);
     }
 
     public string PipeName => _pipeName;
@@ -37,16 +36,6 @@ internal sealed class ClipboardConfigHolder
     public void SetTimeoutMs(int newTimeoutMs)
     {
         lock (_lock) _timeoutMs = newTimeoutMs;
-    }
-
-    public int MaxInputBytes
-    {
-        get { lock (_lock) return _maxInputBytes; }
-    }
-
-    public void SetMaxInputBytes(int newMaxInputBytes)
-    {
-        lock (_lock) _maxInputBytes = newMaxInputBytes;
     }
 
     public bool FailOpen
@@ -63,9 +52,6 @@ internal sealed class ClipboardConfigHolder
 internal sealed class ClipboardSection
 {
     public int PipeTimeoutMs { get; set; } = 6000;
-    // Cap on copied-text size sent for analysis (UTF-8 bytes). Default matches the
-    // orchestrator (config.py) so a missing key behaves identically on both ends.
-    public int MaxInputBytes { get; set; } = 8388608;   // 8 MB
     // fail_closed → BLOCK (default) | fail_open → ALLOW on any pipe/connect failure.
     public string FailureMode { get; set; } = "fail_closed";
 }

@@ -183,6 +183,17 @@ def run_core(
         # see an internally-consistent snapshot. Other field changes pass through.
         new_raw = {**new_raw, "data_pipe": in_use_data_pipe,
                    "ctl_pipe": in_use_ctl_pipe, "admin_pipe": in_use_admin_pipe}
+        # Apply the hot-reloadable orchestrator-side fields in place. The live
+        # PolicyManager / Dispatcher / PipeServer share this `config` object by
+        # reference, so the in-place swap is what makes a server-side reload take
+        # effect without a restart; restart-only fields (pipe names, pools, paths,
+        # proxy, …) are left frozen (see OrchestratorConfig.apply_hot_reload).
+        try:
+            changed = config.apply_hot_reload(new_raw)
+            if changed:
+                log.info("config hot-reload applied: %s", ", ".join(sorted(changed)))
+        except Exception:  # noqa: BLE001 — a bad reload must not kill the watcher thread
+            log.exception("config apply_hot_reload failed; keeping previous orchestrator config")
         raw_cell["raw"] = new_raw
         config_state["reloaded_wall"] = time.time()
         ctl_server.broadcast()

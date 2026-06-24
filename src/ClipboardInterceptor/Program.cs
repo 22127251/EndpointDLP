@@ -20,10 +20,10 @@ var clipboardCfg = ConfigLocator.LoadSection<ClipboardSection>(configPath, "clip
 bool initialFailOpen = string.Equals(clipboardCfg.FailureMode, "fail_open", StringComparison.OrdinalIgnoreCase);
 Console.WriteLine($"[DLP] Loaded orchestrator config: {configPath}");
 Console.WriteLine($"[DLP] data_pipe={initialDataPipe} pipe_timeout_ms={clipboardCfg.PipeTimeoutMs} "
-                + $"max_input_bytes={clipboardCfg.MaxInputBytes} failure_mode={clipboardCfg.FailureMode}");
+                + $"failure_mode={clipboardCfg.FailureMode}");
 
 var holder = new ClipboardConfigHolder(
-    initialDataPipe, clipboardCfg.PipeTimeoutMs, clipboardCfg.MaxInputBytes, initialFailOpen);
+    initialDataPipe, clipboardCfg.PipeTimeoutMs, initialFailOpen);
 
 // --- Enforce clipboard history disabled (watches registry for re-enable attempts) ---
 using var enforcer = new ClipboardHistoryEnforcer();
@@ -59,15 +59,6 @@ var subscriber = new CtlPipeSubscriber(initialCtlPipe, "clipboard", json =>
             {
                 Console.WriteLine($"[DLP] ctl: pipe_timeout_ms updated → {newTimeoutMs}");
                 holder.SetTimeoutMs(newTimeoutMs);
-            }
-        }
-        if (clip.TryGetProperty("max_input_bytes", out var mib) && mib.ValueKind == JsonValueKind.Number)
-        {
-            int newMax = mib.GetInt32();
-            if (newMax != holder.MaxInputBytes)
-            {
-                Console.WriteLine($"[DLP] ctl: max_input_bytes updated → {newMax}");
-                holder.SetMaxInputBytes(newMax);
             }
         }
         if (clip.TryGetProperty("failure_mode", out var fm) && fm.ValueKind == JsonValueKind.String)

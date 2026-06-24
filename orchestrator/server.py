@@ -118,15 +118,16 @@ class PipeServer:
         than the buffer pywin32 returns ``hr == ERROR_MORE_DATA`` with the partial
         bytes (it does NOT raise — confirmed by spike), so we loop until the message
         is complete (``hr == 0``). This is what lets the clipboard channel carry
-        large inline text (``clipboard.max_input_bytes``); browser/peripheral send
-        tiny ``file_path`` messages that complete in one read.
+        large inline text (bounded by ``analyzer.max_extracted_chars``);
+        browser/peripheral send tiny ``file_path`` messages that complete in one read.
 
-        Memory is bounded by an abuse ceiling derived from the clipboard cap (the
-        only channel that sends large inline text) — a JSON envelope around at-cap
-        text plus headroom for escaping. A message past the ceiling returns None;
-        the caller closes the handle, so the client fails per its own failure_mode.
+        Memory is bounded by an abuse ceiling derived from analyzer.max_extracted_chars
+        (the analyzer's scan cap — clipboard is the only channel that sends large inline
+        text, and text past that cap is refused anyway). A message past the ceiling
+        returns None; the caller closes the handle, so the client fails per its own
+        failure_mode. See OrchestratorConfig.clipboard_pipe_ceiling_bytes.
         """
-        ceiling = max(self._config.max_clipboard_bytes, _BUFFER) * 2 + (1 << 20)
+        ceiling = max(self._config.clipboard_pipe_ceiling_bytes(), _BUFFER)
         chunks: list[bytes] = []
         total = 0
         while True:

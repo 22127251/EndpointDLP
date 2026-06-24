@@ -22,7 +22,7 @@ public class ClipboardSelfWriteTests
     {
         // The exact text the service writes on a block must be recognised as its
         // own — this is the case an exact-constant match would have missed.
-        string blockText = ClipboardInterceptorService.BuildBlockText("Phát hiện số thẻ tín dụng (Visa)");
+        string blockText = ClipboardInterceptorService.BuildBlockText("Credit card number (Visa) detected");
         Assert.True(ClipboardInterceptorService.IsDlpAuthored(blockText));
 
         Assert.True(ClipboardInterceptorService.IsDlpAuthored(
@@ -37,13 +37,13 @@ public class ClipboardSelfWriteTests
     }
 
     [Fact]
-    public void BuildBlockText_CarriesReason_AndIsUtf8()
+    public void BuildBlockText_CarriesReason()
     {
-        string text = ClipboardInterceptorService.BuildBlockText("Phát hiện số CCCD/CMND");
-        Assert.Contains("Phát hiện số CCCD/CMND", text);
-        // 'Đ' (U+0110) appears in the fallback below; assert a code point so a
-        // mis-decoded (non-UTF-8) source would fail the build's test run.
-        Assert.Contains('Đ', ClipboardInterceptorService.BuildBlockText(null));   // "Đã chặn"
+        string text = ClipboardInterceptorService.BuildBlockText("Vietnamese Citizen ID (CCCD/CMND) detected");
+        Assert.Contains("Vietnamese Citizen ID (CCCD/CMND) detected", text);
+        Assert.StartsWith("[DLP", text);                                          // marker prefix (loop guard)
+        // The null/blank-reason fallback is the generic English block notice.
+        Assert.Contains("Content blocked", ClipboardInterceptorService.BuildBlockText(null));
     }
 
     [Fact]

@@ -28,7 +28,6 @@ class Dispatcher:
     def __init__(self, cfg: OrchestratorConfig, policy_manager: PolicyManager) -> None:
         self._cfg = cfg
         self._pm = policy_manager
-        self._analysis_timeout = getattr(cfg, "analysis_timeout_seconds", _ANALYSIS_TIMEOUT)
         self._clipboard_pool = ThreadPoolExecutor(
             max_workers=cfg.clipboard_workers, thread_name_prefix="dlp-clip"
         )
@@ -47,6 +46,13 @@ class Dispatcher:
         self._active: set[Future] = set()
         self._active_lock = threading.Lock()
         self._inflight_counts: dict[str, int] = {ch: 0 for ch in _CHANNELS}
+
+    @property
+    def _analysis_timeout(self) -> float:
+        """Live analysis budget (seconds), read from the hot-reloadable config on
+        every access so a `service.analysis_timeout_seconds` change applies to the
+        next analysis without a restart."""
+        return getattr(self._cfg, "analysis_timeout_seconds", _ANALYSIS_TIMEOUT)
 
     def analyze(self, request: dict) -> tuple[str, bool, str]:
         """

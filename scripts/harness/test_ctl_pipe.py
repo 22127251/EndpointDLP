@@ -191,3 +191,53 @@ def test_yaml_save_selective_skip_and_propagate(make_orchestrator):
     finally:
         win32file.CloseHandle(browser_handle)
         win32file.CloseHandle(clipboard_handle)
+
+
+def test_all_client_fields_propagate(make_orchestrator):
+    """One save mutates EVERY client-facing hot-reloadable field across all three
+    components (clipboard / browser / controller) plus the two non-reloadable pipe
+    names; assert each field arrives in the broadcast and the pipe names are
+    overridden back to the in-use values in every payload."""
+    orch = make_orchestrator()
+    raw = yaml.safe_load(orch.config_path.read_text(encoding="utf-8"))
+    ctl_pipe = raw["ctl_pipe"]
+    old_data_pipe = raw["data_pipe"]
+
+    browser_h, _ = _subscribe(ctl_pipe, "browser")
+    clipboard_h, _ = _subscribe(ctl_pipe, "clipboard")
+    controller_h, _ = _subscribe(ctl_pipe, "controller")
+    try:
+        raw["data_pipe"] = r"\\.\pipe\should_not_apply_data"
+        raw["ctl_pipe"] = r"\\.\pipe\should_not_apply_ctl"
+        raw["clipboard"]["pipe_timeout_ms"] = 7777
+        raw["clipboard"]["failure_mode"] = "fail_open"
+        raw["browser"]["pipe_timeout_ms"] = 8888
+        raw["browser"]["failure_mode"] = "fail_open"
+        ctrl = raw["peripheral_storage"]["controller"]
+        ctrl["failure_mode"] = "fail_open"
+        ctrl["target_processes"] = ["explorer.exe", "notepad.exe"]
+        ctrl["payload_dll_path"] = "Changed.dll"
+        _atomic_write_yaml(orch.config_path, raw)
+
+        bu = _read_msg(browser_h, timeout_s=3.0)
+        cu = _read_msg(clipboard_h, timeout_s=3.0)
+        tu = _read_msg(controller_h, timeout_s=3.0)
+
+        for upd in (bu, cu, tu):
+            assert upd["type"] == "config_update", upd
+            # Both pipe names overridden back to in-use in EVERY payload.
+            assert upd["config"]["data_pipe"] == old_data_pipe, upd
+            assert upd["config"]["ctl_pipe"] == ctl_pipe, upd
+
+        assert cu["config"]["clipboard"]["pipe_timeout_ms"] == 7777, cu
+        assert cu["config"]["clipboard"]["failure_mode"] == "fail_open", cu
+        assert bu["config"]["browser"]["pipe_timeout_ms"] == 8888, bu
+        assert bu["config"]["browser"]["failure_mode"] == "fail_open", bu
+        tctrl = tu["config"]["peripheral_storage"]["controller"]
+        assert tctrl["failure_mode"] == "fail_open", tu
+        assert tctrl["target_processes"] == ["explorer.exe", "notepad.exe"], tu
+        assert tctrl["payload_dll_path"] == "Changed.dll", tu
+    finally:
+        win32file.CloseHandle(browser_h)
+        win32file.CloseHandle(clipboard_h)
+        win32file.CloseHandle(controller_h)

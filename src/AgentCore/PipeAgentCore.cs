@@ -7,53 +7,47 @@ namespace AgentCore;
 
 public class PipeAgentCore : IAgentCore
 {
-    private const int DefaultMaxContentBytes = 1048576;
     // Either _provider is null (literal-value ctor was used) or it is set
     // (provider ctor used). Provider is read once per AnalyseAsync so that
     // connect, write, and read of a single request all see the same snapshot —
-    // a mid-flight ctl-push that changes the timeout/cap doesn't split the call.
-    private readonly Func<(string PipeName, int TimeoutMs, int MaxContentBytes, bool FailOpen)>? _provider;
+    // a mid-flight ctl-push that changes the timeout doesn't split the call.
+    private readonly Func<(string PipeName, int TimeoutMs, bool FailOpen)>? _provider;
     private readonly string _constantPipeName;
     private readonly int _constantTimeoutMs;
-    private readonly int _constantMaxContentBytes;
     private readonly bool _constantFailOpen;
 
     public PipeAgentCore(string pipeName = "dlp_agent", int timeoutMs = 6000)
     {
         _constantPipeName = pipeName;
         _constantTimeoutMs = timeoutMs;
-        _constantMaxContentBytes = DefaultMaxContentBytes;
         _constantFailOpen = false;   // fail closed by default (BLOCK on pipe error)
         _provider = null;
     }
 
     /// <summary>
     /// Provider-form ctor: ClipboardInterceptor passes a closure over a
-    /// thread-safe ConfigHolder so hot-reloaded timeout / max_input_bytes /
-    /// failure_mode take effect on the next AnalyseAsync call without
-    /// re-instantiating PipeAgentCore.
+    /// thread-safe ConfigHolder so a hot-reloaded timeout / failure_mode takes
+    /// effect on the next AnalyseAsync call without re-instantiating PipeAgentCore.
     /// </summary>
-    public PipeAgentCore(Func<(string PipeName, int TimeoutMs, int MaxContentBytes, bool FailOpen)> provider)
+    public PipeAgentCore(Func<(string PipeName, int TimeoutMs, bool FailOpen)> provider)
     {
         _provider = provider;
         _constantPipeName = "";
         _constantTimeoutMs = 0;
-        _constantMaxContentBytes = DefaultMaxContentBytes;
         _constantFailOpen = false;
     }
 
     public async Task<AnalysisOutcome> AnalyseAsync(string content, CancellationToken ct = default)
     {
-        var (pipeName, timeoutMs, maxContentBytes, failOpen) =
+        var (pipeName, timeoutMs, failOpen) =
             _provider?.Invoke()
-            ?? (_constantPipeName, _constantTimeoutMs, _constantMaxContentBytes, _constantFailOpen);
+            ?? (_constantPipeName, _constantTimeoutMs, _constantFailOpen);
 
         // Unified per-channel failure verdict (clipboard.failure_mode): fail_open →
-        // ALLOW, fail_closed → BLOCK. Applied to oversize content and any pipe failure.
+        // ALLOW, fail_closed → BLOCK. Applied to any pipe/connect/analysis failure.
+        // The FULL clipboard text is sent regardless of size — the analyzer decides
+        // whether to scan it based on analyzer.max_extracted_chars (reason=text_cap).
         var failVerdict = failOpen ? AnalysisDecision.Allow : AnalysisDecision.Block;
-
-        if (Encoding.UTF8.GetByteCount(content) > maxContentBytes)
-            return new AnalysisOutcome(failVerdict, null);
 
         // Overall deadline that covers connect + write + read. Without this,
         // ReadAsync after a successful connect could block indefinitely if the
