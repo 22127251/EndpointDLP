@@ -1,0 +1,23 @@
+# EditorConfig is awesome: https://EditorConfig.org
+
+# top-most EditorConfig file
+root = true
+
+# --- Global Defaults ---
+[*]
+indent_style = space
+indent_size = 4
+end_of_line = crlf
+charset = utf-8
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+# --- Linux Scripts ---
+# Inherits the 4-space indent from above, but forces LF line endings.
+[*.sh]
+end_of_line = lf
+
+# --- Windows Scripts ---
+# Explicitly enforcing CRLF for PowerShell just to be safe and clear.
+[*.ps1]
+end_of_line = crlf
