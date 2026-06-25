@@ -4,7 +4,7 @@ services:
     container_name: dlp_db_container
     restart: always
     environment:
-      - POSTGRES_PASSWORD=22127475
+      - POSTGRES_PASSWORD=password
       - POSTGRES_DB=dlpserver
     ports:
       - "5432:5432"
@@ -26,7 +26,7 @@ services:
     env_file:
       - ./server/.env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://postgres:22127475@db:5432/dlpserver
+      - DATABASE_URL=postgresql+asyncpg://postgres:password@db:5432/dlpserver
     # networks:
     #   - dlp_network
 
