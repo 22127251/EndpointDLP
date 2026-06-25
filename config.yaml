@@ -16,8 +16,36 @@ pools:
   pipe_listeners:             4
 
 limits:
-  max_clipboard_bytes: 1048576       # 1 MB
-  max_file_bytes:      104857600     # 100 MB (browser)
+  max_file_bytes:      104857600     # 100 MB (browser upload cap; hot-reloadable)
+  # Clipboard copied TEXT has no separate byte cap — it is governed by
+  # analyzer.max_extracted_chars (over it → reason=text_cap). The per-channel verdict
+  # on a refused input (oversize file / text_cap / timeout / analysis-error) is the
+  # unified `failure_mode` knob on each channel's own section below.
+
+analyzer:
+  # Cap on extracted text per file analysis (characters; ~2 bytes each in memory).
+  # Enforced DURING extraction (max_file_bytes caps FILE size, but a 6.6 MB docx
+  # expands ~14× to a 93 MB body, so a file-size cap alone cannot bound the body).
+  # Over it → extraction is refused and the channel's failure_mode verdict applies,
+  # logged reason=text_cap. ~16M chars ≈ a few hundred MB peak/analysis, which keeps
+  # the 7-worker worst case ≈ 1 GB on the 8 GB VM. Set <=0 to disable the cap.
+  # ALSO governs clipboard copied TEXT (text longer than this → reason=text_cap →
+  # clipboard.failure_mode). Hot-reloadable (dlp-ctl reload / save applies it live).
+  max_extracted_chars: 16000000
+
+  # File extensions the analyzer is built + tested to extract and scan. A file
+  # with an explicit, NON-LISTED extension is refused BEFORE extraction (so an
+  # untested or binary type is never scanned as garbage text) and follows the
+  # channel's failure_mode (logged reason=unsupported_format). A file with NO
+  # extension is NOT refused — some upload paths strip it (Gmail delivers every
+  # file as "upload"), so it falls through to the plaintext analyzer (PII recall
+  # preserved). The list is the 8 tested
+  # formats (docx/odt/ods/xlsx/csv/txt/md/pdf) plus clearly-textual fallbacks
+  # (tsv/json/yaml/yml/log). Only the FILE channels (browser, peripheral_storage)
+  # consult it — clipboard text has no extension. Hot-reloadable (dlp-ctl reload /
+  # config.yaml save applies it live). Matching is case-insensitive; a leading dot
+  # is added if omitted.
+  supported_extensions: [.docx, .odt, .ods, .xlsx, .csv, .tsv, .txt, .md, .pdf, .json, .yaml, .yml, .log]
 
 supervisor:                          # Consumed in Phase C; harmless to keep now.
   max_restarts: 3
@@ -25,7 +53,10 @@ supervisor:                          # Consumed in Phase C; harmless to keep now
   stable_uptime_reset_seconds: 60
 
 service:                             # Phase F: graceful drain on stop.
-  drain_timeout_seconds: 8           # SvcStop waits up to this for in-flight analyses
+  drain_timeout_seconds: 12          # SvcStop waits up to this for in-flight analyses (≥ analysis timeout)
+  # Orchestrator analysis budget. INVARIANT: every client pipe timeout below must
+  # exceed this (client waits 12 s > analysis 10 s) or the client gives up early.
+  analysis_timeout_seconds: 10
 
 paths:
   mitmdump_exe: ""                   # auto-detect in venv if empty
@@ -72,88 +103,69 @@ install:
 # ── Per-component sections (each component reads ONLY its own subtree) ──
 
 clipboard:
-  pipe_timeout_ms: 6000              # was hardcoded in PipeAgentCore.cs:13
+  # The ClipboardInterceptor now sends the FULL copied text — there is no client-side
+  # byte cap. Whether the text is scanned is governed by analyzer.max_extracted_chars:
+  # text longer than that is refused WITHOUT scanning (reason=text_cap) and follows
+  # failure_mode below. (The data pipe still bounds reassembly memory at a ceiling
+  # derived from max_extracted_chars; pathologically huge copies are dropped.)
+  pipe_timeout_ms: 12000             # client wait > orchestrator analysis (10 s)
+  # Verdict on ANY failure for this channel — orchestrator-side (timeout / text_cap /
+  # analysis-error) AND the client's own pipe/connect failure:
+  # fail_closed → BLOCK (default), fail_open → ALLOW. Hot-reloadable.
+  failure_mode: fail_closed
 
 browser:                             # All fields migrated from interceptors/browser/config.yaml.
-  pipe_timeout_seconds: 5
-  fail_behavior: "open"             # "allow" | "block" on pipe error
-  temp_dir: "D:\\Code\\GithubPublishEndpointDLP\\tmp"   # empty → system %TEMP%
-  min_upload_size_bytes: 1024
+  pipe_timeout_ms: 12000             # was pipe_timeout_seconds; client wait > orchestrator analysis (10 s)
+  # Verdict on ANY failure for this channel — orchestrator-side (timeout / oversize /
+  # analysis-error) AND the addon's own pipe/connect failure (Phase 7; replaces the old
+  # fail_behavior): fail_closed → BLOCK (default), fail_open → ALLOW.
+  # NOTE: default fail_closed now BLOCKS uploads when the orchestrator is down
+  # (the retired fail_behavior:"open" let them through).
+  failure_mode: fail_closed
+  # The upload filters (extensions / mime_types / domain_blocklist /
+  # upload_url_keywords), min_upload_size_bytes, and temp_dir are HARDCODED in
+  # interceptors/browser/config.py (rarely changed; not admin-exposed). temp_dir
+  # resolves to the system %TEMP%. Edit that file to change them.
 
-  # Domains to skip unconditionally (analytics, telemetry, logging)
-  domain_blocklist:
-    - google-analytics.com
-    - analytics.google.com
-    - beacons.gcp.gvt2.com
-    - beacons.gvt2.com
-    - beacons3.gvt2.com
-    - ssl.gstatic.com
+peripheral_storage:
+  controller:                        # The Controller (DLL injector) reads this subtree.
+    # Verdict applied INSIDE the C++ NtCreateFile hook when shared memory is
+    # unavailable/unreadable: fail_closed → block the removable-drive WRITE,
+    # fail_open → allow it through. (Affects WRITE / directory-create ops only;
+    # reads/navigation always pass.) Written into the shared-memory drive map for
+    # the hook; hot-reloadable. NOTE: default is now fail_closed (was fail_mode: open).
+    failure_mode: fail_closed        # was peripheral_storage.fail_mode (open/closed)
+    target_processes:
+      - explorer.exe
+    shared_memory_name: UsbDlpDriveMap # NOT hot-reloadable (see config_watcher in __main__.py)
+    payload_dll_path: Payload.dll      # relative → resolved against Controller.exe dir
 
-  # URL path/query keywords that signal a real upload endpoint.
-  upload_url_keywords:
-    - upload
-    - attach
-    - import
-
-  # File type allow-list. Leave both lists empty to inspect everything.
-  extensions:
-    - .pdf
-    - .doc
-    - .docx
-    - .xls
-    - .xlsx
-    - .ppt
-    - .pptx
-    - .odt
-    - .ods
-    - .odp
-    - .zip
-    - .rar
-    - .7z
-    - .tar
-    - .gz
-    - .csv
-    - .txt
-
-  mime_types:
-    - application/pdf
-    - application/msword
-    - application/vnd.openxmlformats-officedocument.wordprocessingml.document
-    - application/vnd.ms-excel
-    - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
-    - application/vnd.ms-powerpoint
-    - application/vnd.openxmlformats-officedocument.presentationml.presentation
-    - application/vnd.oasis.opendocument.text
-    - application/vnd.oasis.opendocument.spreadsheet
-    - application/vnd.oasis.opendocument.presentation
-    - application/zip
-    - application/x-rar-compressed
-    - application/x-7z-compressed
-    - application/x-tar
-    - application/gzip
-    - text/plain
-    - text/csv
-
-peripheral_storage:                  # Controller reads this whole subtree.
-  target_processes:
-    - explorer.exe
-
-  # Behavior when shared memory is unavailable or cannot be read inside the hook.
-  # "open"   (default) — allow the file operation through
-  # "closed" — block all removable-drive writes when unsure
-  fail_mode: open
-
-  shared_memory_name: UsbDlpDriveMap # NOT hot-reloadable (see config_watcher in __main__.py)
-  payload_dll_path: Payload.dll      # relative → resolved against Controller.exe dir
-
-  # Phase E (E0 spike result). false → Controller runs once in Session 0
-  # (LocalSystem service) and injects cross-session into every user's explorer.exe
-  # (Option A; SeDebugPrivilege enabled in the Controller). Set true ONLY if the
-  # E0 spike shows cross-session injection fails on this OS — then the service
-  # launches a Controller per user session via CreateProcessAsUser with the user's
-  # elevated/linked token (Option B). Ignored in --foreground (always Session-local).
-  controller_in_user_session: false
+    # Phase E (E0 spike result). false → Controller runs once in Session 0
+    # (LocalSystem service) and injects cross-session into every user's explorer.exe
+    # (Option A; SeDebugPrivilege enabled in the Controller). Set true ONLY if the
+    # E0 spike shows cross-session injection fails on this OS — then the service
+    # launches a Controller per user session via CreateProcessAsUser with the user's
+    # elevated/linked token (Option B). Ignored in --foreground (always Session-local).
+    in_user_session: false           # was controller_in_user_session
 
   transfer_agent:                    # TransferAgent reads only this nested subtree.
     connect_timeout_ms: 5000         # was hardcoded in OrchestratorClient.cs:24
-    analysis_timeout_seconds: 10     # was hardcoded in OrchestratorClient.cs:25
+    analysis_timeout_ms: 12000       # was analysis_timeout_seconds; client wait > orchestrator analysis (10 s)
+    # Verdict for peripheral-channel failures — orchestrator-side (timeout / oversize /
+    # analysis-error) AND the C# client's own pipe/connect failure (Phase 7):
+    # fail_closed → BLOCK (default), fail_open → ALLOW.
+    failure_mode: fail_closed
+
+# ── Phase AC-3: App Control (WDAC) channel (orchestrator-internal daemon threads) ──
+# The channel runs inside run_core; it watches an inbox drop-folder for compiled
+# policy pushes, deploys them via citool, and forwards CodeIntegrity block events
+# to events.jsonl. It sits IDLE (no policy) until the first push (decision 7).
+app_control:
+  enabled: true                      # false → channel does not start
+  inbox_dir: ""                      # empty → %PROGRAMDATA%\DLP\appcontrol\inbox
+  rejected_dir: ""                   # empty → %PROGRAMDATA%\DLP\appcontrol\rejected
+  staging_dir: ""                    # empty → %PROGRAMDATA%\DLP\appcontrol\staging
+  poll_seconds: 3                    # inbox poll interval (2–5 s recommended)
+  reconcile_interval_seconds: 30     # how often to re-sync status with live citool state
+  forward_block_events: true         # subscribe to CodeIntegrity/Operational and log our blocks
+  extra_paths: []                    # extra self-protect FilePath roots (AC-4/AC-5 may set)

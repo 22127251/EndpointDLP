@@ -17,10 +17,13 @@ catch (FileNotFoundException ex)
 
 var (initialDataPipe, initialCtlPipe) = ConfigLocator.LoadTopLevel(configPath);
 var clipboardCfg = ConfigLocator.LoadSection<ClipboardSection>(configPath, "clipboard");
+bool initialFailOpen = string.Equals(clipboardCfg.FailureMode, "fail_open", StringComparison.OrdinalIgnoreCase);
 Console.WriteLine($"[DLP] Loaded orchestrator config: {configPath}");
-Console.WriteLine($"[DLP] data_pipe={initialDataPipe} pipe_timeout_ms={clipboardCfg.PipeTimeoutMs}");
+Console.WriteLine($"[DLP] data_pipe={initialDataPipe} pipe_timeout_ms={clipboardCfg.PipeTimeoutMs} "
+                + $"failure_mode={clipboardCfg.FailureMode}");
 
-var holder = new ClipboardConfigHolder(initialDataPipe, clipboardCfg.PipeTimeoutMs);
+var holder = new ClipboardConfigHolder(
+    initialDataPipe, clipboardCfg.PipeTimeoutMs, initialFailOpen);
 
 // --- Enforce clipboard history disabled (watches registry for re-enable attempts) ---
 using var enforcer = new ClipboardHistoryEnforcer();
@@ -47,15 +50,25 @@ var subscriber = new CtlPipeSubscriber(initialCtlPipe, "clipboard", json =>
                 $"[DLP] ctl: data_pipe change requires restart; keeping {holder.PipeName} (pushed {pushedPipe})");
         }
     }
-    if (json.TryGetProperty("clipboard", out var clip)
-        && clip.TryGetProperty("pipe_timeout_ms", out var t)
-        && t.ValueKind == JsonValueKind.Number)
+    if (json.TryGetProperty("clipboard", out var clip))
     {
-        int newTimeoutMs = t.GetInt32();
-        if (newTimeoutMs != holder.TimeoutMs)
+        if (clip.TryGetProperty("pipe_timeout_ms", out var t) && t.ValueKind == JsonValueKind.Number)
         {
-            Console.WriteLine($"[DLP] ctl: pipe_timeout_ms updated → {newTimeoutMs}");
-            holder.SetTimeoutMs(newTimeoutMs);
+            int newTimeoutMs = t.GetInt32();
+            if (newTimeoutMs != holder.TimeoutMs)
+            {
+                Console.WriteLine($"[DLP] ctl: pipe_timeout_ms updated → {newTimeoutMs}");
+                holder.SetTimeoutMs(newTimeoutMs);
+            }
+        }
+        if (clip.TryGetProperty("failure_mode", out var fm) && fm.ValueKind == JsonValueKind.String)
+        {
+            bool newFailOpen = string.Equals(fm.GetString(), "fail_open", StringComparison.OrdinalIgnoreCase);
+            if (newFailOpen != holder.FailOpen)
+            {
+                Console.WriteLine($"[DLP] ctl: failure_mode updated → {(newFailOpen ? "fail_open" : "fail_closed")}");
+                holder.SetFailOpen(newFailOpen);
+            }
         }
     }
 })

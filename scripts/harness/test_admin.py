@@ -64,6 +64,10 @@ def test_admin_status(make_orchestrator):
     # Harness runs with DLP_SUPERVISOR_DISABLED, so no supervised children.
     assert resp["children"] == {}
     assert "last_config_reload" in resp and "last_policy_reload" in resp
+    # Phase AC-3: the status carries an app_control block. The harness sets
+    # DLP_APPCONTROL_DISABLED, so the channel is not running (but the key exists).
+    ac = resp.get("app_control")
+    assert isinstance(ac, dict) and ac["running"] is False
 
 
 def test_admin_reload_applies_both(make_orchestrator):

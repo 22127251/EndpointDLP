@@ -3,7 +3,7 @@
 (a) Subscribe with snapshot_request returns a config_snapshot matching the
     spawned orchestrator's config.yaml.
 (b) Saving the yaml with ONE non-hot-reloadable field (data_pipe) AND TWO
-    hot-reloadable fields (browser.fail_behavior + clipboard.pipe_timeout_ms)
+    hot-reloadable fields (browser.failure_mode + clipboard.pipe_timeout_ms)
     in a single atomic save results in:
       - a single config_update arriving to each subscriber within ~1.5 s,
       - the data_pipe field overridden back to the in-use value,
@@ -145,8 +145,8 @@ def test_subscribe_returns_snapshot(make_orchestrator):
         assert config["data_pipe"] == orch.pipe_name
         assert config["ctl_pipe"] == ctl_pipe
         # Browser section reflects what's on disk.
-        assert config["browser"]["pipe_timeout_seconds"] == raw["browser"]["pipe_timeout_seconds"]
-        assert config["browser"]["fail_behavior"] == raw["browser"]["fail_behavior"]
+        assert config["browser"]["pipe_timeout_ms"] == raw["browser"]["pipe_timeout_ms"]
+        assert config["browser"]["failure_mode"] == raw["browser"]["failure_mode"]
     finally:
         win32file.CloseHandle(handle)
 
@@ -156,7 +156,7 @@ def test_yaml_save_selective_skip_and_propagate(make_orchestrator):
     raw = yaml.safe_load(orch.config_path.read_text(encoding="utf-8"))
     ctl_pipe = raw["ctl_pipe"]
     old_data_pipe = raw["data_pipe"]
-    old_fail = raw["browser"]["fail_behavior"]
+    old_fail = raw["browser"]["failure_mode"]
     old_clip_timeout = raw["clipboard"]["pipe_timeout_ms"]
 
     browser_handle, browser_snap = _subscribe(ctl_pipe, "browser")
@@ -164,14 +164,14 @@ def test_yaml_save_selective_skip_and_propagate(make_orchestrator):
 
     try:
         # Sanity-check snapshots match starting state.
-        assert browser_snap["config"]["browser"]["fail_behavior"] == old_fail
+        assert browser_snap["config"]["browser"]["failure_mode"] == old_fail
         assert clipboard_snap["config"]["clipboard"]["pipe_timeout_ms"] == old_clip_timeout
 
         # Mutate one non-hot-reloadable + two hot-reloadable fields in one save.
-        new_fail = "allow" if old_fail == "block" else "block"
+        new_fail = "fail_open" if old_fail == "fail_closed" else "fail_closed"
         new_clip_timeout = old_clip_timeout + 1000
         raw["data_pipe"] = r"\\.\pipe\dlp_changed_should_not_apply"
-        raw["browser"]["fail_behavior"] = new_fail
+        raw["browser"]["failure_mode"] = new_fail
         raw["clipboard"]["pipe_timeout_ms"] = new_clip_timeout
         _atomic_write_yaml(orch.config_path, raw)
 
@@ -186,8 +186,58 @@ def test_yaml_save_selective_skip_and_propagate(make_orchestrator):
         assert clipboard_update["config"]["data_pipe"] == old_data_pipe, clipboard_update
 
         # Hot-reloadable changes propagated.
-        assert browser_update["config"]["browser"]["fail_behavior"] == new_fail, browser_update
+        assert browser_update["config"]["browser"]["failure_mode"] == new_fail, browser_update
         assert clipboard_update["config"]["clipboard"]["pipe_timeout_ms"] == new_clip_timeout, clipboard_update
     finally:
         win32file.CloseHandle(browser_handle)
         win32file.CloseHandle(clipboard_handle)
+
+
+def test_all_client_fields_propagate(make_orchestrator):
+    """One save mutates EVERY client-facing hot-reloadable field across all three
+    components (clipboard / browser / controller) plus the two non-reloadable pipe
+    names; assert each field arrives in the broadcast and the pipe names are
+    overridden back to the in-use values in every payload."""
+    orch = make_orchestrator()
+    raw = yaml.safe_load(orch.config_path.read_text(encoding="utf-8"))
+    ctl_pipe = raw["ctl_pipe"]
+    old_data_pipe = raw["data_pipe"]
+
+    browser_h, _ = _subscribe(ctl_pipe, "browser")
+    clipboard_h, _ = _subscribe(ctl_pipe, "clipboard")
+    controller_h, _ = _subscribe(ctl_pipe, "controller")
+    try:
+        raw["data_pipe"] = r"\\.\pipe\should_not_apply_data"
+        raw["ctl_pipe"] = r"\\.\pipe\should_not_apply_ctl"
+        raw["clipboard"]["pipe_timeout_ms"] = 7777
+        raw["clipboard"]["failure_mode"] = "fail_open"
+        raw["browser"]["pipe_timeout_ms"] = 8888
+        raw["browser"]["failure_mode"] = "fail_open"
+        ctrl = raw["peripheral_storage"]["controller"]
+        ctrl["failure_mode"] = "fail_open"
+        ctrl["target_processes"] = ["explorer.exe", "notepad.exe"]
+        ctrl["payload_dll_path"] = "Changed.dll"
+        _atomic_write_yaml(orch.config_path, raw)
+
+        bu = _read_msg(browser_h, timeout_s=3.0)
+        cu = _read_msg(clipboard_h, timeout_s=3.0)
+        tu = _read_msg(controller_h, timeout_s=3.0)
+
+        for upd in (bu, cu, tu):
+            assert upd["type"] == "config_update", upd
+            # Both pipe names overridden back to in-use in EVERY payload.
+            assert upd["config"]["data_pipe"] == old_data_pipe, upd
+            assert upd["config"]["ctl_pipe"] == ctl_pipe, upd
+
+        assert cu["config"]["clipboard"]["pipe_timeout_ms"] == 7777, cu
+        assert cu["config"]["clipboard"]["failure_mode"] == "fail_open", cu
+        assert bu["config"]["browser"]["pipe_timeout_ms"] == 8888, bu
+        assert bu["config"]["browser"]["failure_mode"] == "fail_open", bu
+        tctrl = tu["config"]["peripheral_storage"]["controller"]
+        assert tctrl["failure_mode"] == "fail_open", tu
+        assert tctrl["target_processes"] == ["explorer.exe", "notepad.exe"], tu
+        assert tctrl["payload_dll_path"] == "Changed.dll", tu
+    finally:
+        win32file.CloseHandle(browser_h)
+        win32file.CloseHandle(clipboard_h)
+        win32file.CloseHandle(controller_h)

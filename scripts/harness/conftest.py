@@ -39,6 +39,16 @@ def _load_fixture_policy(name: str) -> str:
     return (_FIXTURE_POLICIES_DIR / name).read_text(encoding="utf-8")
 
 
+def _deep_merge(base: dict, overrides: dict) -> None:
+    """Recursively merge *overrides* into *base* in place (nested dicts merged,
+    other values replaced)."""
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
 @dataclass
 class Orchestrator:
     pipe_name: str
@@ -105,6 +115,7 @@ def make_orchestrator():
         policies_fixture: Optional[str] = None,
         pool_overrides: Optional[dict] = None,
         extra_env: Optional[dict] = None,
+        config_overrides: Optional[dict] = None,
         ready_timeout_s: float = 10.0,
     ) -> Orchestrator:
         if policies_yaml is None and policies_fixture is None:
@@ -137,7 +148,7 @@ def make_orchestrator():
             "ctl_pipe": ctl_pipe_name,
             "admin_pipe": admin_pipe_name,
             "pools": pools,
-            "limits": {"max_clipboard_bytes": 1048576, "max_file_bytes": 104857600},
+            "limits": {"max_file_bytes": 104857600},
             "supervisor": {
                 "max_restarts": 3,
                 "restart_window_seconds": 60,
@@ -154,10 +165,10 @@ def make_orchestrator():
             # Phase B per-component sections — minimal values; tests don't need
             # the full browser allow/block lists. The orchestrator just relays
             # these over the ctl-pipe; it doesn't consume them itself.
-            "clipboard": {"pipe_timeout_ms": 6000},
+            "clipboard": {"pipe_timeout_ms": 6000, "failure_mode": "fail_closed"},
             "browser": {
-                "pipe_timeout_seconds": 5,
-                "fail_behavior": "block",
+                "pipe_timeout_ms": 5000,
+                "failure_mode": "fail_closed",
                 "temp_dir": "",
                 "min_upload_size_bytes": 1024,
                 "domain_blocklist": [],
@@ -166,16 +177,26 @@ def make_orchestrator():
                 "mime_types": [],
             },
             "peripheral_storage": {
-                "target_processes": ["explorer.exe"],
-                "fail_mode": "open",
-                "shared_memory_name": f"UsbDlpDriveMap_{run_id}",
-                "payload_dll_path": "Payload.dll",
+                "controller": {
+                    "failure_mode": "fail_open",
+                    "target_processes": ["explorer.exe"],
+                    "shared_memory_name": f"UsbDlpDriveMap_{run_id}",
+                    "payload_dll_path": "Payload.dll",
+                    "in_user_session": False,
+                },
                 "transfer_agent": {
                     "connect_timeout_ms": 5000,
-                    "analysis_timeout_seconds": 10,
+                    "analysis_timeout_ms": 12000,
+                    "failure_mode": "fail_closed",
                 },
             },
         }
+        # config_overrides deep-merges into the generated config so a test can set
+        # nested keys (e.g. {"clipboard": {"failure_mode": "fail_open"}} or
+        # {"limits": {"max_file_bytes": 4}}) without restating the whole tree.
+        if config_overrides:
+            _deep_merge(config, config_overrides)
+
         config_path = tmp_dir / "config.yaml"
         config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
@@ -184,6 +205,12 @@ def make_orchestrator():
         # The harness tests pipe/dispatch/config-watch behavior, not the supervised
         # children (which are exercised by test_supervisor.py).
         env["DLP_SUPERVISOR_DISABLED"] = "1"
+        # Phase AC-3: keep the App Control channel out of the subprocess fixtures.
+        # It needs LocalSystem privilege (deploy to System32, EvtSubscribe the CI
+        # log) and is verified by its own in-process unit tests + the VM run, not by
+        # the pipe/dispatch harness. A dedicated env (not DLP_SUPERVISOR_DISABLED) so
+        # the channel and the supervisor stay decoupled.
+        env["DLP_APPCONTROL_DISABLED"] = "1"
         # Isolate each orchestrator's logs to its own tmp dir. configure_logging
         # derives the log dir from %PROGRAMDATA%; without this every harness
         # orchestrator writes the SHARED %PROGRAMDATA%\DLP\logs\{dlp-agent.log,

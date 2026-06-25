@@ -68,11 +68,58 @@ _CTL_WRAPPER_BODY = (
     "exit /b %ERRORLEVEL%\n"
 )
 
+# AC-5 follow-up: an installed uninstaller dropped at <install_root>\uninstall.cmd
+# so the agent can be removed even after the deploy bundle is gone. It runs the
+# INSTALLED python (<install_root>\python\python.exe) — which the App Control
+# self-protect FilePath rule (<install_root>\*) allows even while an enforcement
+# policy is deployed; the bundle's embed python is NOT covered and WDAC blocks it.
+# It self-relaunches from %TEMP% so the running script is never inside the tree it
+# deletes (no "batch file cannot be found"), and sets cwd to %SystemRoot% (outside
+# the tree) so the tree is removable. The install root is baked in at write time
+# (%~dp0 would point at %TEMP% after the relaunch). Module resolution rides the
+# embed's python313._pth `..` entry, which puts <install_root> on sys.path.
+_UNINSTALL_WRAPPER_NAME = "uninstall.cmd"
+_UNINSTALL_WRAPPER_BODY = (
+    "@echo off\n"
+    "REM DLP Agent uninstaller (installed copy). Run as administrator.\n"
+    "REM Uses the INSTALLED python (allowed by the App Control self-protect policy),\n"
+    "REM so uninstall works even while an enforcement policy is deployed. Re-launches\n"
+    "REM from %TEMP% so it never deletes the script that is running.\n"
+    "setlocal\n"
+    'if /i "%~1"=="_fromtemp" goto work\n'
+    'copy /y "%~f0" "%TEMP%\\dlp-uninstall.cmd" >nul 2>&1\n'
+    'start "DLP Uninstall" "%TEMP%\\dlp-uninstall.cmd" _fromtemp\n'
+    "exit /b 0\n"
+    ":work\n"
+    'cd /d "%SystemRoot%"\n'
+    '"{install_root}\\python\\python.exe" -m orchestrator --uninstall '
+    '--config "{install_root}\\config.yaml"\n'
+    "echo.\n"
+    "echo DLP uninstall finished.\n"
+    "pause\n"
+    '(goto) 2>nul & del "%~f0"\n'
+)
+
 # Well-known sc.exe / certutil exit codes we treat as "already absent" success
 _ERROR_SERVICE_DOES_NOT_EXIST = 1060
 _ERROR_SERVICE_NOT_ACTIVE = 1062
 _ERROR_SERVICE_EXISTS = 1073
 _ERROR_SERVICE_ALREADY_RUNNING = 1056
+
+# AC-5: DISM exit codes we treat as success when enabling ConfigCI offline.
+# 0 = ERROR_SUCCESS; 3010 = ERROR_SUCCESS_REBOOT_REQUIRED (installed, reboot
+# pending — with /norestart AC-1 saw no reboot on Home 26200, but accept it
+# defensively). Any other code is a hard failure (fail-closed, decision D1).
+_DISM_SUCCESS_CODES = (0, 3010)
+
+# Actionable hint shown when ConfigCI cannot be enabled (mirrors
+# app_control.hashing._DISM_HINT; installer is a different layer, so the string is
+# duplicated rather than importing a private name).
+_DISM_HINT = (
+    r"Enable it offline (admin): "
+    r"gci $Env:SystemRoot\servicing\Packages\*ConfigCI*.mum | "
+    r'% { dism /online /norestart /add-package:"$($_.FullName)" }'
+)
 
 
 # ─── Dataclasses ────────────────────────────────────────────────────────────
@@ -447,13 +494,21 @@ def _build_default_steps() -> list[Step]:
         _step_make_dirs(),
         _step_copy_payload(),
         _step_install_ctl_wrapper(),
+        _step_install_uninstall_wrapper(),
         _step_add_to_path(),
+        # AC-5 App Control setup, placed early so a fail-closed ConfigCI error (D1)
+        # aborts before the heavier CA / proxy / shell-ext / service steps run.
+        _step_appcontrol_dirs(),
+        _step_enable_configci(),
         _step_bootstrap_ca(),
         _step_install_root_ca(),
         _step_backup_proxy(),
         _step_set_proxy(),
         _step_register_shellext(),
         _step_notify_shell(),
+        # AC-5: must be the last step before install_service so its undo runs after
+        # the service is stopped and before copy_payload removes the install tree (D3).
+        _step_appcontrol_policy_guard(),
         _step_install_service(),
     ]
 
@@ -643,8 +698,9 @@ def build_bundle_config(src_config_path: str | Path, dest_config_path: str | Pat
         points at ``python-embed/Scripts/mitmdump.exe``, the bundle's embed dir),
       - ``paths.log_dir`` → "" (so it defaults to %PROGRAMDATA%\\DLP\\logs on the VM),
       - ``policies_file`` → ``analyzer/policies.yaml``,
-      - ``browser.temp_dir`` → "" (the only host-absolute setting; "" → system %TEMP%),
       - ``install.install_root`` → "" (so it defaults to %ProgramFiles%\\DLP).
+    (browser.temp_dir is no longer a config key — it is hardcoded to the system
+    %TEMP% in interceptors/browser/config.py — so nothing to neutralize here.)
     Everything else is copied verbatim, so new config sections flow through.
     """
     src = Path(src_config_path)
@@ -658,11 +714,6 @@ def build_bundle_config(src_config_path: str | Path, dest_config_path: str | Pat
     raw["paths"] = paths
 
     raw["policies_file"] = "analyzer/policies.yaml"
-
-    browser = dict(raw.get("browser") or {})
-    if "temp_dir" in browser or browser:
-        browser["temp_dir"] = ""        # host-absolute → neutralize to system %TEMP%
-        raw["browser"] = browser
 
     install_section = dict(raw.get("install") or {})
     install_section["install_root"] = ""
@@ -978,6 +1029,32 @@ def _step_install_ctl_wrapper() -> Step:
     return Step("install_ctl_wrapper", do, undo)
 
 
+def _step_install_uninstall_wrapper() -> Step:
+    """Write <install_root>\\uninstall.cmd so the agent can be removed even if the
+    deploy bundle is gone, and — crucially — so uninstall runs from the INSTALLED
+    python (allowed by the App Control self-protect policy) rather than the bundle's
+    embed python (blocked by WDAC under a deployed enforcement policy). The script
+    self-relaunches from %TEMP% so it doesn't delete itself mid-run (see
+    ``_UNINSTALL_WRAPPER_BODY``)."""
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        path = ctx.install_root / _UNINSTALL_WRAPPER_NAME
+        body = _UNINSTALL_WRAPPER_BODY.replace("{install_root}", str(ctx.install_root))
+        path.write_text(body, encoding="ascii", newline="\r\n")
+        log.info("install_uninstall_wrapper: wrote %s", path)
+        return {"path": str(path)}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        target = Path((payload or {}).get("path",
+                                          ctx.install_root / _UNINSTALL_WRAPPER_NAME))
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.info("install_uninstall_wrapper undo: skipping %s (%s)", target, exc)
+    return Step("install_uninstall_wrapper", do, undo)
+
+
 def _step_add_to_path() -> Step:
     """Append <install_root> to the machine PATH so `dlp-ctl` resolves anywhere.
 
@@ -1023,6 +1100,189 @@ def _step_add_to_path() -> Step:
         except OSError as exc:
             log.info("add_to_path undo: skipping (%s)", exc)
     return Step("add_to_path", do, undo)
+
+
+# ─── AC-5: App Control channel install steps ─────────────────────────────────
+
+
+def _default_dism_runner(mum_path: str) -> "tuple[int, str]":
+    """Install one servicing package offline via DISM. Uses the absolute
+    ``System32\\Dism.exe`` path (with a bare-name fallback, mirroring
+    ``deployer.citool_path()``) so it resolves regardless of PATH. Returns
+    ``(returncode, stdout+stderr)`` — the injectable seam tests replace."""
+    windir = os.environ.get("SystemRoot", r"C:\Windows")
+    cand = os.path.join(windir, "System32", "Dism.exe")
+    exe = cand if os.path.isfile(cand) else "dism"
+    proc = subprocess.run(
+        [exe, "/online", "/norestart", f"/add-package:{mum_path}"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _step_appcontrol_dirs() -> Step:
+    """Create the App Control drop-folder tree under
+    ``%ProgramData%\\DLP\\appcontrol``. The running channel also mkdirs these on
+    start (``channel.start``), but this step registers them with the installer so
+    uninstall strips the WHOLE tree — inbox/rejected/staging plus the operator's
+    allow/deny lists and any pending or rejected pushes (parent decision 7).
+    Resolution goes through ``app_control.paths`` so it matches the channel
+    byte-for-byte (same single source of truth the AC-4 builder shares)."""
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        from orchestrator.app_control import paths as ac_paths
+        root = ac_paths.appcontrol_root(ctx.config)
+        targets = [root, ac_paths.inbox_dir(ctx.config),
+                   ac_paths.rejected_dir(ctx.config), ac_paths.staging_dir(ctx.config)]
+        created: list[str] = []
+        for d in targets:
+            if not d.exists():
+                d.mkdir(parents=True, exist_ok=True)
+                created.append(str(d))
+        log.info("appcontrol_dirs: ensured %s (+inbox/rejected/staging)", root)
+        return {"root": str(root), "created": created}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        from orchestrator.app_control import paths as ac_paths
+        root_str = (payload or {}).get("root") or str(ac_paths.appcontrol_root(ctx.config))
+        root = Path(root_str)
+        if root.exists():
+            _rmtree_with_retry(root)
+            log.info("appcontrol_dirs undo: removed %s", root)
+    return Step("appcontrol_dirs", do, undo)
+
+
+def _configci_available(powershell: str = "powershell") -> bool:
+    """True if the ConfigCI module is usable — i.e. ``ConvertFrom-CIPolicy`` resolves.
+    This is the real success criterion for enable_configci (not per-package DISM exit
+    codes). Probed in a fresh **Windows PowerShell** process (ConfigCI is a Windows
+    PowerShell 5.1 module — the same host ``dlp-ctl appcontrol build`` compiles in)."""
+    try:
+        proc = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command",
+             "if (Get-Command ConvertFrom-CIPolicy -ErrorAction SilentlyContinue) "
+             "{ exit 0 } else { exit 9 }"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def _step_enable_configci(
+        dism_runner: Callable[[str], "tuple[int, str]"] | None = None,
+        packages_dir: str | Path | None = None,
+        probe: Callable[[], bool] | None = None) -> Step:
+    """Enable the ConfigCI PowerShell module offline so on-endpoint ``dlp-ctl
+    appcontrol build`` can compile policies (``ConvertFrom-CIPolicy`` /
+    ``New-CIPolicy``). Win11 Home stages the ConfigCI ``*.mum`` servicing packages
+    but does not install them; ``dism /add-package`` installs them with no reboot
+    (AC-1 VM-proven).
+
+    The servicing dir holds SEVERAL ConfigCI revisions (e.g. ``26100.1591`` /
+    ``.8246`` / ``.8521``); only the one matching the current cumulative-update level
+    installs — the others fail "not applicable" (e.g. DISM rc ``14107``). So
+    per-package DISM failures are EXPECTED and non-fatal (this mirrors the AC-1
+    PowerShell ``gci | %`` loop, which continues past them). The success test is a
+    post-loop **probe**: ``ConvertFrom-CIPolicy`` must resolve.
+
+    FAIL-CLOSED (decision D1): when app_control is enabled and ConfigCI is still NOT
+    available after the attempt, the step raises -> the transactional driver rolls the
+    install back. When ``app_control.enabled`` is false the step is skipped entirely
+    (the escape hatch for a box that genuinely can't enable ConfigCI — the rest of the
+    agent still installs). Idempotent: if ConfigCI is already available (a reinstall,
+    or an image that ships it) the DISM loop is skipped. ``undo`` is a deliberate
+    no-op (leaving ConfigCI enabled is benign). ``dism_runner`` / ``packages_dir`` /
+    ``probe`` are injectable for tests."""
+    runner = dism_runner or _default_dism_runner
+    check = probe or _configci_available
+
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        if not ctx.config.app_control_enabled:
+            log.info("enable_configci: app_control disabled in config; skipping "
+                     "ConfigCI enable (on-endpoint `dlp-ctl appcontrol build` stays "
+                     "unavailable until app_control is enabled).")
+            return {"skipped": True}
+        if check():
+            log.info("enable_configci: ConfigCI already available; nothing to do")
+            return {"already_available": True}
+        windir = os.environ.get("SystemRoot", r"C:\Windows")
+        pkg_dir = (Path(packages_dir) if packages_dir
+                   else Path(windir) / "servicing" / "Packages")
+        mums = sorted(pkg_dir.glob("*ConfigCI*.mum"))
+        log.info("enable_configci: ConfigCI not yet available; attempting %d servicing "
+                 "package(s) via DISM (down-level revisions will fail 'not applicable' "
+                 "and are skipped — this can take a minute)", len(mums))
+        added: list[str] = []
+        failed: list[str] = []
+        for mum in mums:
+            rc, out = runner(str(mum))
+            if rc in _DISM_SUCCESS_CODES:
+                added.append(mum.name)
+            else:
+                # Down-level / not-applicable revision — expected; keep going so the
+                # applicable revision still installs (AC-1 loop behavior).
+                failed.append(mum.name)
+                log.info("enable_configci: %s not applicable (rc=%s); continuing",
+                         mum.name, rc)
+        if not check():
+            raise RuntimeError(
+                "enable_configci: ConfigCI still unavailable after attempting "
+                f"{len(mums)} package(s) under {pkg_dir} (added={added or 'none'}, "
+                f"failed={failed or 'none'}); on-endpoint `dlp-ctl appcontrol build` "
+                f"cannot work. {_DISM_HINT}  Or set app_control.enabled: false in "
+                "config.yaml to skip the channel entirely.")
+        log.info("enable_configci: ConfigCI available (added %d package(s), %d not "
+                 "applicable); ConvertFrom-CIPolicy ready for on-endpoint build",
+                 len(added), len(failed))
+        return {"packages_added": added, "packages_failed": failed}
+
+    return Step("enable_configci", do, _noop_undo)
+
+
+def _step_appcontrol_policy_guard(citool_runner: Callable | None = None) -> Step:
+    """Strip any deployed App Control policy at uninstall. Install deploys NO policy
+    (parent decision 7 — the channel is idle until the first push), so ``do`` only
+    records the base PolicyID in the manifest. But by uninstall time the operator may
+    have deployed an enforcement policy via ``dlp-ctl appcontrol apply``; a leftover
+    WDAC policy with no agent to manage it would keep blocking apps. ``undo`` runs the
+    AC-3 deployer's ``remove()`` (``citool --remove-policy``, no reboot on 24H2+, with
+    the AllowAll-neutralizer fallback) and deletes the status record (decision D6).
+
+    Placed immediately before ``install_service`` (D3) so its undo runs AFTER the
+    service is stopped and BEFORE ``copy_payload`` removes the install tree — which
+    holds ``base.xml`` + the pre-compiled ``neutralizer.cip`` the fallback needs.
+    ``citool_runner`` is injectable for tests."""
+    def do(ctx: InstallContext) -> dict[str, Any] | None:
+        from orchestrator.app_control import policy_xml as px
+        policy_id = px.get_policy_id(px.load_base_policy())
+        log.info("appcontrol_policy_guard: recorded policy id %s for uninstall removal",
+                 policy_id)
+        return {"policy_id": policy_id}
+
+    def undo(ctx: InstallContext, payload: dict[str, Any] | None) -> None:
+        from orchestrator.app_control import policy_xml as px
+        from orchestrator.app_control.deployer import Deployer
+        policy_id = (payload or {}).get("policy_id")
+        if not policy_id:
+            try:
+                policy_id = px.get_policy_id(px.load_base_policy())
+            except Exception as exc:  # noqa: BLE001
+                log.warning("appcontrol_policy_guard undo: cannot resolve policy id "
+                            "(%s); skipping policy removal", exc)
+                return
+        status_path = ctx.state_dir / "appcontrol_status.json"
+        try:
+            dep = Deployer(status_path=status_path, policy_id=policy_id,
+                           runner=citool_runner)
+            removed = dep.remove()  # citool --remove-policy + neutralizer fallback
+            log.info("appcontrol_policy_guard undo: deployer.remove() -> %s", removed)
+        except Exception:  # noqa: BLE001 — uninstall must continue regardless
+            log.exception("appcontrol_policy_guard undo: remove() raised; continuing")
+        try:
+            status_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.info("appcontrol_policy_guard undo: status unlink skipped (%s)", exc)
+    return Step("appcontrol_policy_guard", do, undo)
 
 
 def _step_install_service() -> Step:

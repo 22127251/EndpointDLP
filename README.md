@@ -12,7 +12,7 @@ A LocalSystem Windows service (`DLPAgent`) supervises the interceptors across us
 > - **§A Dev environment** — full toolchain installed; build / automated-test / install / manual-test / uninstall, all from source.
 > - **§B Test environment** — a clean Windows 11 VM with **no** dev tools; install / test / uninstall a prebuilt bundle.
 
-> **Pre-test markers.** Steps verified on the author's dev box are tagged **✅ PRE-TESTED**. Steps that require a Visual Studio Developer PowerShell, an elevated/admin shell, or the VM (which the author could not run here) are tagged **⚠️ NOT PRE-TESTED — verify on first run**.
+> **Pre-test markers.** Steps verified on the author's dev box are tagged **✅ PRE-TESTED**. Steps confirmed by a full manual run — build → bundle → install on the clean Windows 11 VM → end-to-end decision tests → uninstall (2026-06-24) — are tagged **✅ MANUALLY TESTED**. The only step still requiring a Visual Studio Developer PowerShell to re-verify from scratch is tagged **⚠️ NOT PRE-TESTED — verify on first run**.
 
 ---
 
@@ -80,7 +80,7 @@ Verify the analyzer deps import:
 python -c "import ahocorasick, re2, fitz, win32service, mitmproxy, yaml, watchdog; print('deps OK')"
 ```
 
-> ⚠️ **NOT PRE-TESTED** — the author's `.venv` already existed; the commands above are the documented setup but were not re-run from scratch in this session.
+> ✅ **MANUALLY TESTED** — the venv setup underpinned the full build → bundle → VM-install pass (2026-06-24); the dep-import self-check above printed `deps OK`.
 
 **`requirements.txt`** (orchestrator/runtime): `mitmproxy`, `pywin32`, `pyyaml`, `watchdog`.
 **`analyzer/requirements.txt`** (analyzer): `google-re2`, `pyyaml`, `pyahocorasick`, `python-docx`, `openpyxl`, `python-pptx`, `odfpy`, `PyMuPDF`, `pymupdf-layout`.
@@ -98,7 +98,7 @@ Requires that A.2 succeeded (it copies `ahocorasick*.pyd` + `pyahocorasick-*.dis
 
 > **Download resilience / "An existing connection was forcibly closed by the remote host".** python.org's CDN sometimes resets the connection mid-download. The script downloads via `curl.exe --retry-all-errors` (Windows built-in) with an `Invoke-WebRequest` fallback, and **reuses an already-downloaded file** at `%TEMP%\python-<ver>-embed-amd64.zip` (and `%TEMP%\get-pip.py`). So if a download keeps failing or is very slow, fetch the URL in a browser to that exact `%TEMP%` path and re-run — the script skips the download. (Observed on the dev box: a degraded link made the ~12 MB embed take several minutes even via curl; be patient or retry on a better network.)
 
-> ⚠️ **PARTIALLY PRE-TESTED** — the embed download itself was verified here (curl pulled a valid 12.5 MB zip with `python.exe`); the full script (pip bootstrap + dep install + `embed OK` self-check) was not run end-to-end in this session.
+> ✅ **MANUALLY TESTED** — `prepare-python-embed.ps1` ran end-to-end (download + pip bootstrap + dep install + `embed OK` self-check); the resulting embed shipped in the bundle that installed and ran on the clean VM (2026-06-24).
 
 ## A.4 Build — C# + C++ interceptor artifacts
 
@@ -138,7 +138,7 @@ Two suites: the **Python** orchestrator/analyzer harness (pytest) and the **C#**
 
 ### Python harness (pytest)
 
-Spawns isolated orchestrator subprocesses and exercises pipe concurrency, policy hot-reload, dispatcher timeout/fail-closed, clipboard supersession, the supervisor, the installer driver, the admin-pipe + events log, and the bounded drain.
+Spawns isolated orchestrator subprocesses and exercises pipe concurrency, policy hot-reload, **config hot-reload** (both that every hot-reloadable field applies live and that restart-only fields stay inert), dispatcher timeout/fail-closed, clipboard supersession, the supervisor, the installer driver, the admin-pipe + events log, and the bounded drain.
 
 ```powershell
 # normal PowerShell, .venv activated, from <RepoRoot>:
@@ -149,13 +149,13 @@ python -m pytest scripts\harness -v
 & "<RepoRoot>\.venv\Scripts\python.exe" -m pytest scripts\harness -q
 ```
 
-**Expected: `35 passed, 3 skipped`.** The 3 skips are the **admin-pipe** tests in `test_admin.py` — they require an **elevated** process (the admin-pipe DACL is Administrators-only) and correctly skip under a normal prompt. To run them too, launch PowerShell **as Administrator** and re-run; they should pass.
+**Expected: `222 passed, 3 skipped`.** The 3 skips are the **admin-pipe** tests in `test_admin.py` — they require an **elevated** process (the admin-pipe DACL is Administrators-only) and correctly skip under a normal prompt. To run them too, launch PowerShell **as Administrator** and re-run; they should pass.
 
 - **Policies used by the automated tests:** `scripts\harness\fixture_policies\permissive.yaml` (default — allows everything) and `visa_block.yaml` (blocks a Visa-format number with no context). You normally do **not** edit these.
 - **Config used:** auto-generated per test (unique pipe names) under `tmp\harness\<uuid>\config.yaml`.
 - **Logs:** isolated per test under `tmp\harness\<uuid>\DLP\logs\` (the harness redirects `%PROGRAMDATA%` so tests never touch the real log dir). The whole `tmp\harness\` tree is cleaned on teardown.
 
-> ✅ **PRE-TESTED** — `35 passed, 3 skipped` in ~17 s on the dev box (non-elevated, so the 3 admin-pipe tests skipped as expected). A trailing `cleanup_numbered_dir … PermissionError` line from pytest's own temp-symlink cleanup is a benign Windows quirk printed *after* the result and does not affect the outcome.
+> ✅ **PRE-TESTED** — `222 passed, 3 skipped` in ~59 s on the dev box (non-elevated, so the 3 admin-pipe tests skipped as expected). A trailing `cleanup_numbered_dir … PermissionError` line from pytest's own temp-symlink cleanup is a benign Windows quirk printed *after* the result and does not affect the outcome.
 
 ### C# unit tests (xUnit)
 
@@ -163,6 +163,7 @@ The shared C# client library has an xUnit v3 test project, `src\AgentCore.Tests\
 - `PipeAgentCoreTests.cs` — the `PipeAgentCore` named-pipe client (incl. fail-closed on pipe error/timeout).
 - `ConfigLocatorTests.cs` — `DlpShared.ConfigLocator` discovery (`DLP_CONFIG_PATH` env var → walk-up with the `data_pipe:` sentinel check).
 - `PipeNameHelperTests.cs` — `DlpShared.PipeNameHelper` name conversion.
+- `ClipboardSelfWriteTests.cs` — the clipboard self-write loop guard + the English block text (`[DLP] Blocked: <reason>` / `[DLP] Content blocked`).
 
 ```powershell
 # any shell with the .NET 10 SDK on PATH (e.g. a VS 2026 Developer PowerShell), from <RepoRoot>:
@@ -171,7 +172,7 @@ dotnet test src\AgentCore.Tests\AgentCore.Tests.csproj
 
 First run restores the xUnit / Test.Sdk NuGet packages (needs internet once). No admin required. These are independent of the Python suite — they don't touch pipes or the analyzer.
 
-> ✅ **PRE-TESTED** — `10 passed, 0 failed` in ~2 s on the dev box (`dotnet` was on PATH at `C:\Program Files\dotnet\dotnet.exe`, so a normal PowerShell worked too). A `CA2022` build warning in `PipeAgentCoreTests.cs` is benign (code-analysis hint, not a test failure).
+> ✅ **PRE-TESTED** — `17 passed, 0 failed` in ~2 s on the dev box (`dotnet` was on PATH at `C:\Program Files\dotnet\dotnet.exe`, so a normal PowerShell worked too). `CA2022` build warnings in `PipeAgentCoreTests.cs` are benign (code-analysis hints, not test failures).
 
 > **Note on `--foreground`.** The automated harness uses `python -m orchestrator --foreground` internally (with `DLP_SUPERVISOR_DISABLED`), but **foreground is not a manual-test method**: in a normal session the Controller can't inject the USB hook (it needs admin + `SeDebugPrivilege`), and the browser channel does nothing until the mitmproxy CA is trusted and the proxy is set. Both only happen during **install**, so the dev-box manual test is done via a real install (A.7), exactly like the VM.
 
@@ -186,7 +187,7 @@ Assembles a lean self-contained `dist\DLP\` + `dist\DLP.zip` (embed + built arti
 powershell -ExecutionPolicy Bypass -File scripts\package-bundle.ps1
 ```
 
-> ⚠️ **NOT PRE-TESTED end-to-end** — the script was syntax/parse-checked only (it needs `python-embed\` + built `bin` to assemble). Verify after A.3/A.4.
+> ✅ **MANUALLY TESTED** — `package-bundle.ps1` assembled `dist\DLP\` + `DLP.zip`, which installed and ran end-to-end on the clean VM (2026-06-24).
 
 ## A.7 Install on the dev box (the dev-box manual test)
 
@@ -209,7 +210,7 @@ Get-Service DLPAgent          # expect Running
 dlp-ctl status
 ```
 
-> ⚠️ **NOT PRE-TESTED** — needs admin + the built artifacts; this is the same install flow as the VM (§B).
+> ✅ **MANUALLY TESTED** — the elevated install registered + started `DLPAgent` and `dlp-ctl status` responded (2026-06-24); this is the same install flow as the VM (§B).
 
 ## A.8 Manual test (the installed agent)
 
@@ -226,7 +227,29 @@ dlp-ctl tail --log -n 80       # last 80 lines of dlp-agent.log
 .\dlp-ctl.cmd status
 ```
 
-> ✅ **PRE-TESTED (CLI logic)** — `tail` and the "agent not running"/"missing pywin32" guidance paths were verified via `python -m orchestrator.ctl …`; the installed `dlp-ctl` PATH wrapper + the live elevated `status`/`reload` round-trip are install/VM-verified.
+> ✅ **MANUALLY TESTED** — `dlp-ctl status`/`reload`/`tail` over the installed PATH wrapper, including the live elevated round-trip and a `reload` that applied edited config + policies, passed on the clean VM (2026-06-24).
+
+#### App Control (WDAC) — `dlp-ctl appcontrol` (Phase AC-4)
+
+The standalone operator loop for the App Control channel. `allow`/`deny`/`build`/`apply` are **offline** local-file operations (run elevated); `status`/`disable` talk to the running agent. The agent's inbox watcher deploys whatever `apply` drops — no hand-built pushes, no central server.
+
+```powershell
+dlp-ctl appcontrol allow "C:\Program Files\7-Zip"      # add Allow targets (files/folders)
+dlp-ctl appcontrol deny  "C:\…\OneDrive.exe"            # add Deny targets
+dlp-ctl appcontrol allow "C:\…\old" --remove           # drop entries from a list
+dlp-ctl appcontrol build                               # compile lists -> staging\build\ (auto-bumps VersionEx)
+dlp-ctl appcontrol apply                               # move the staged push into the inbox (go live)
+dlp-ctl appcontrol status                              # lists + staged build + deployed policy/blocks
+dlp-ctl appcontrol disable                             # remove the deployed policy (via the agent)
+dlp-ctl appcontrol disable --force-local               # emergency removal driving citool directly (agent-down escape)
+```
+
+- Lists live at `C:\ProgramData\DLP\appcontrol\{allow,deny}-list.txt`; folders are re-scanned for executables at every `build`. Each target gets a WDAC rule on its **InternalName**; a file with no usable PE version-info falls back to a **Hash** rule automatically. Self-protect rules (`<install_root>\*` + `C:\Program Files\dotnet\*`) are always merged so the agent stays runnable under its own policy.
+- `build` compiles with `ConvertFrom-CIPolicy`, so the endpoint needs the **ConfigCI** module. The installer's `enable_configci` step DISM-enables it automatically at install time (fail-closed — a clean install always has a working on-endpoint `build`), so no manual step is needed. To opt out, set `app_control.enabled: false` in config.yaml — that skips both the channel and the ConfigCI enable; if you later want on-endpoint `build` while disabled, enable ConfigCI once with:
+  `Get-ChildItem $Env:SystemRoot\servicing\Packages\*ConfigCI*.mum | % { dism /online /norestart /add-package:"$($_.FullName)" }`
+- **Uninstall** removes any deployed App Control policy (`citool --remove-policy`, no reboot) and strips the whole `C:\ProgramData\DLP\appcontrol\` tree (lists + pushes) plus the status record, leaving the box as it was before install. The uninstaller runs from the **installed** python (`C:\Program Files\DLP\python`), which the self-protect policy allows, so uninstall works **even while a policy is enforced** — the bundle's embed python would be blocked. The installer also drops `C:\Program Files\DLP\uninstall.cmd` so you can uninstall after the deploy bundle is gone. To **re-install over a still-enforced policy**, disable it first (`dlp-ctl appcontrol disable`), then run `install.cmd` — a fresh install uses the bundle python, which a live policy would otherwise block.
+
+> ✅ **MANUALLY TESTED** — list management, a real `ConvertFrom-CIPolicy` build + `apply`, and the live deploy/block/disable round-trip on the installed service were verified on the clean VM (2026-06-24).
 
 **Where to change the INPUT (what gets blocked):** edit the **installed** policy file, then reload —
 
@@ -245,24 +268,27 @@ dlp-ctl tail --log -n 80       # last 80 lines of dlp-agent.log
 Make a test file/text that contains **both** a matching number **and** a context word (e.g. a `.csv`/`.txt`/`.docx` with `credit card: 4111 1111 1111 1111`). A clean file (no PII, or PII without context) should **ALLOW**.
 
 **Manual checks:**
-1. **USB block** — copy any file to a removable drive via Explorer → blocked; right-click a file → **"Transfer to USB (DLP Protected)"** → the TransferAgent scans it → ALLOW for clean, BLOCK for a CCCD/Visa-with-context file.
-2. **Browser** — upload the test file via Google Drive / Gmail → BLOCK shows a popup on your desktop; clean upload proceeds.
-3. **Clipboard** — copy text containing a card+context → blocked.
-4. **Audit** — confirm a line per decision in `events.jsonl` and a BLOCK/ALLOW line in `dlp-agent.log`.
+1. **USB block** — copy any file to a removable drive via Explorer → blocked; right-click a file → **"Transfer to USB (DLP Protected)"** → the TransferAgent scans it → ALLOW for clean, BLOCK for a CCCD/Visa-with-context file. The results **Note** column now shows a human reason — the policy's `user_message` on a policy block (e.g. *"Vietnamese Citizen ID (CCCD/CMND) detected"*), or a friendly failure reason (e.g. *"File type is not supported"* for an unsupported type) — instead of the file hash. (All end-user notifications are in **English**.)
+2. **Browser** — upload the test file via Google Drive / Gmail → BLOCK shows a popup on your desktop carrying the reason **and** an instruction to reload the page and stop the upload (a blocked upload surfaces in Drive as a "network error" and otherwise retries); clean upload proceeds.
+3. **Clipboard** — copy text containing a card+context → blocked, and the clipboard is replaced with `[DLP] Blocked: <reason>` (English). Re-copy normal text → restored/allowed (the replacement text is excluded from re-analysis, so it cannot loop). **Large text:** the interceptor now sends the *entire* copied text (there is **no** client-side byte cap) — copy the whole contents of a big text file (e.g. a ~7 MB `.txt`) and it is analyzed in full and blocked/allowed on its content. Whether the text is scanned is governed by `analyzer.max_extracted_chars`: text **longer** than that is refused without scanning (`reason=text_cap` in `dlp-agent.log`) and follows `clipboard.failure_mode`. `max_extracted_chars` is **hot-reloadable** (`dlp-ctl reload` / save). (The data pipe still bounds reassembly memory at a ceiling derived from `max_extracted_chars`, so a pathologically huge copy is dropped and fails per `failure_mode`.)
+4. **Audit** — confirm a line per decision in `events.jsonl` (a BLOCK line carries a `reason` category — see §A.9) and a BLOCK/ALLOW line in `dlp-agent.log`.
+5. **Failure mode** — every channel has a `failure_mode` (`fail_closed` → BLOCK, the default; `fail_open` → ALLOW) that decides the verdict when analysis can't complete (oversize file, **text over `max_extracted_chars`**, timeout, analysis error, the **unsupported file type**, or — for the clients — the orchestrator pipe being unreachable). Quick demo via the clipboard text-cap path: set `analyzer.max_extracted_chars: 100` in `config.yaml`, `dlp-ctl reload`, then copy any longer text → **BLOCK** (`reason=text_cap` in `dlp-agent.log`); now add `clipboard.failure_mode: fail_open`, `dlp-ctl reload`, copy again → **ALLOW**. Restore the values + reload when done. **This now exercises a true SERVER-side hot-reload:** `failure_mode`, `limits.max_file_bytes`, `analyzer.max_extracted_chars`, `analyzer.supported_extensions`, and `service.analysis_timeout_seconds` are applied live by the orchestrator on `dlp-ctl reload`/save (previously they were frozen at startup). (The orchestrator-side failure modes and the config hot-reload are covered automatically by `scripts\harness\test_failure_mode.py`, `test_config_apply_hot_reload.py`, and `test_config_hot_reload_e2e.py`.) **Unsupported formats:** only the extensions in `analyzer.supported_extensions` (the 8 tested formats — `docx/odt/ods/xlsx/csv/txt/md/pdf` — plus textual `tsv/json/yaml/yml/log`) are scanned; any other type with an **explicit** extension (e.g. `.pptx`, `.exe`, an image) is refused with `reason=unsupported_format` and follows `failure_mode`. A file with **no** extension is **not** refused — it is analyzed as plaintext (some upload paths, notably **Gmail**, strip the extension and deliver every file as `upload`, so blocking on a missing extension would block legitimate `.txt`/`.csv`/`.md` uploads). `supported_extensions` is now **hot-reloadable** (no restart needed). **Behavior:** the **browser** channel defaults to `fail_closed`, so uploads are **blocked** if the orchestrator is unreachable.
 
-> ⚠️ **NOT PRE-TESTED** in this session (needs the installed agent on a machine with a removable drive + browser). These mirror the VM end-to-end checks in §B.3.
+> ✅ **MANUALLY TESTED** — all five checks passed on the clean VM (2026-06-24): USB block + Transfer Agent (English Note), browser upload popup (English reason + reload/stop guidance), clipboard block with the English `[DLP] Blocked: <reason>` text **and** the large-copy + `analyzer.max_extracted_chars` `text_cap` reload demo, the `events.jsonl`/`dlp-agent.log` audit lines (incl. `config hot-reload applied: …`), and the `failure_mode` BLOCK↔ALLOW flip on `dlp-ctl reload`.
 
 ## A.9 Logs & locations (where to check OUTPUT)
 
 | Path | Contents |
 |---|---|
 | `C:\ProgramData\DLP\logs\dlp-agent.log` | Main log: startup, BLOCK/ALLOW decision lines (with `elapsed_ms` + `policy_id(action)×N`), reloads, errors. |
-| `C:\ProgramData\DLP\logs\events.jsonl` | **Structured audit** — one JSON line per decision: `ts, req_id, channel, kind, decision, violations:[{policy_id,count}], elapsed_ms, superseded, name, url` (URL query-stripped). |
+| `C:\ProgramData\DLP\logs\events.jsonl` | **Structured audit** — one JSON line per decision: `ts, req_id, channel, kind, decision, violations:[{policy_id,count}], elapsed_ms, superseded, name, url` (URL query-stripped), and `reason` on a BLOCK — a stable category token (`policy_violation` / `oversize` / `text_cap` / `unsupported_format` / `timeout` / `analysis_error` / `malformed`) so a block's cause is unambiguous (cf. ECS `event.reason`). |
 | `C:\ProgramData\DLP\logs\supervisor-{mitmdump,clipboard,controller}.log` | Per-child process output. |
 | `C:\ProgramData\DLP\state\` | `install_manifest.json`, `installed_ca.txt`, `proxy_backup*.json`. |
 | `C:\ProgramData\DLP\mitmproxy\` | Generated mitmproxy CA (trusted into LocalMachine\Root by install). |
 
 The installed service logs to `C:\ProgramData\DLP\logs\`. (The automated tests are the exception — they redirect to `tmp\harness\<uuid>\DLP\logs\`.)
+
+> ✅ **MANUALLY TESTED** — these paths and contents were confirmed on the clean VM (2026-06-24): the `dlp-agent.log` decision lines + the `config hot-reload applied: …` line, and the `events.jsonl` `reason` tokens (including `text_cap` for an over-cap clipboard copy).
 
 ## A.10 Uninstall (dev box)
 
@@ -282,7 +308,7 @@ Test-Path "$env:ProgramFiles\DLP"                             # False
 [Environment]::GetEnvironmentVariable('Path','Machine')       # no C:\Program Files\DLP entry
 ```
 
-> ⚠️ **NOT PRE-TESTED** — needs admin + a prior install.
+> ✅ **MANUALLY TESTED** — uninstall reversed the service stop+delete, CA removal, proxy restore, shell-ext unregister, PATH entry + wrapper removal, and tree delete on the VM (2026-06-24); the verify checks above all came back clean.
 
 ---
 
@@ -313,7 +339,7 @@ Everything else (the Python runtime, all deps, the native DLLs with static CRT) 
    ```
    If Stopped: `Start-Service DLPAgent` (note: bare `sc start` in PowerShell is an alias for `Set-Content` — use `Start-Service` or `sc.exe start DLPAgent`).
 
-> ⚠️ **NOT PRE-TESTED** in this session (VM-only). The install flow + the auto-start + the `dlp-ctl` PATH wrapper are the items to confirm here.
+> ✅ **MANUALLY TESTED** — on the clean VM (2026-06-24) `install.cmd` (elevated, bundled embed Python) registered + **auto-started** `DLPAgent`, installed the CA + proxy + shell extension, and put `dlp-ctl` on the machine PATH.
 
 ## B.3 Test on the VM
 
@@ -330,17 +356,17 @@ dlp-ctl tail --follow     # live events.jsonl
 - Input policies: `C:\Program Files\DLP\analyzer\policies.yaml` (edit + `dlp-ctl reload` to change what's blocked).
 - Output: `C:\ProgramData\DLP\logs\dlp-agent.log` and `events.jsonl` (locations identical to §A.9).
 
-Run through: USB copy block + "Transfer to USB" agent; Google-Drive/Gmail upload block (popup on the user desktop) + clean upload; clipboard text block; confirm `events.jsonl` lines (with `{policy_id,count}` violations and a query-stripped URL). Test across an **admin** and a **standard (non-admin)** user session (fast-user-switch) — each gets its own interceptors; the non-admin session's `dlp-ctl status` should be **denied** (admin-pipe is Administrators-only).
+Run through: USB copy block + "Transfer to USB" agent; Google-Drive/Gmail upload block (popup on the user desktop) + clean upload; clipboard text block (English `[DLP] Blocked: <reason>`) — **including a large ~7 MB copy** (sent in full and analyzed, not size-rejected) and the `failure_mode` + server-side hot-reload demo from §A.8 (steps 3 & 5, now via `analyzer.max_extracted_chars` → `reason=text_cap`); confirm `events.jsonl` lines (with `{policy_id,count}` violations and a query-stripped URL). Test across an **admin** and a **standard (non-admin)** user session (fast-user-switch) — each gets its own interceptors; the non-admin session's `dlp-ctl status` should be **denied** (admin-pipe is Administrators-only).
 
 Reboot the VM → the service should **auto-start** (no manual start needed).
 
-> ⚠️ **NOT PRE-TESTED** — VM end-to-end. (These same behaviors passed on the author's VM in earlier phases; re-verify after this build.)
+> ✅ **MANUALLY TESTED** — the full VM end-to-end run passed (2026-06-24): USB block + Transfer Agent, Google-Drive/Gmail upload block + clean upload, clipboard block **including the large ~7 MB copy and the `analyzer.max_extracted_chars` `text_cap` + `failure_mode` reload demo**, the `events.jsonl` lines, the admin vs non-admin session split (non-admin `dlp-ctl status` denied), and the reboot **auto-start**.
 
 ## B.4 Uninstall (VM)
 
 **Right-click `uninstall.cmd` → "Run as administrator"** (it prefers the bundle's own Python so it never locks the install tree). Reverses everything and is safe to re-run. Verify as in A.10. If a native DLL is still pinned by `explorer.exe`, use **Start ▸ Power ▸ Restart** (a true restart, not Shut down — Fast Startup skips pending deletes) and re-check.
 
-> ⚠️ **NOT PRE-TESTED** — VM-only.
+> ✅ **MANUALLY TESTED** — `uninstall.cmd` (elevated) reversed everything on the VM and the verify checks came back clean (2026-06-24).
 
 ---
 
@@ -353,4 +379,13 @@ Reboot the VM → the service should **auto-start** (no manual start needed).
 | Logs | n/a (not run from source) | `C:\ProgramData\DLP\logs\` | `tmp\harness\<uuid>\DLP\logs\` |
 | Apply policy/config edits | rebuild/reinstall to apply | save (auto) or `dlp-ctl reload` | n/a |
 
-`config.yaml` sections: `data_pipe`/`ctl_pipe`/`admin_pipe` (named pipes), `pools` (worker counts), `limits`, `supervisor` (restart policy), `service.drain_timeout_seconds`, `paths` (artifact locations — **Debug** by default), `proxy`, `policies_file`, `install` (`install_root`, `service_start_type: auto`, …), and per-component sections `clipboard` / `browser` / `peripheral_storage`. **Policy rules live separately in `analyzer/policies.yaml`** (policy ≠ config).
+`config.yaml` sections: `data_pipe`/`ctl_pipe`/`admin_pipe` (named pipes, **restart-only**), `pools` (worker counts, restart-only), `limits.max_file_bytes` (browser upload cap), `analyzer.max_extracted_chars` (also governs clipboard text), `analyzer.supported_extensions` (file types the analyzer scans; others → `unsupported_format` + `failure_mode`), `supervisor` (restart policy, restart-only), `service` (`drain_timeout_seconds`, `analysis_timeout_seconds`), `paths` (artifact locations — **Debug** by default, restart-only), `proxy` (restart-only), `policies_file` (restart-only), `install` (`install_root`, `service_start_type: auto`, …), and per-component sections, each read only by its own client:
+- `clipboard` — `pipe_timeout_ms`, `failure_mode`. (There is **no** copied-text byte cap: the full clipboard text is sent and `analyzer.max_extracted_chars` decides whether it is scanned.)
+- `browser` — `pipe_timeout_ms`, `failure_mode` (default `fail_closed`). The upload filters (`extensions`/`mime_types`/`domain_blocklist`/`upload_url_keywords`), `min_upload_size_bytes`, and `temp_dir` are **hardcoded** in `interceptors/browser/config.py` (rarely changed; not admin-exposed — `temp_dir` resolves to the system `%TEMP%`).
+- `peripheral_storage` split into `controller:` (the DLL-injector/`NtCreateFile` hook — `failure_mode`, `target_processes`, `shared_memory_name`, `payload_dll_path`, `in_user_session`) and `transfer_agent:` (`connect_timeout_ms`, `analysis_timeout_ms`, `failure_mode`).
+
+`failure_mode` (`fail_closed`→BLOCK default | `fail_open`→ALLOW) is unified across channels for every analysis/pipe failure.
+
+**Hot-reloadable** (apply on `dlp-ctl reload` or `config.yaml` save, **no restart**): every per-component client field above, plus the orchestrator's own `failure_mode`, `limits.max_file_bytes`, `analyzer.max_extracted_chars`, `analyzer.supported_extensions`, `service.analysis_timeout_seconds`, and `service.drain_timeout_seconds`. (Before this change the orchestrator froze its own settings at startup and only the client sections + App Control reloaded — that gap is fixed; see `orchestrator/config.py::apply_hot_reload`.) **Restart-only:** the pipe names, `pools`/`pipe_listeners`, `paths.*`, `proxy.*`, `policies_file`, `supervisor.*`, and `install.*` (the agent logs a "requires restart" warning if a pipe name is changed). `peripheral_storage.controller.shared_memory_name` is likewise rejected at runtime by the Controller.
+
+**Policy rules live separately in `analyzer/policies.yaml`** (policy ≠ config). Each policy may set a `user_message:` — the end-user block reason (in **English**) shown on the browser popup, the clipboard replacement text, and the Transfer Agent Note (the policy `id` is never shown). It is hot-reloadable via `dlp-ctl reload`. Failure-mode blocks (timeout/oversize/text_cap/unsupported/…) instead show a per-category English message defined in `orchestrator/messages.py`. **All end-user notifications across every channel are in English.**

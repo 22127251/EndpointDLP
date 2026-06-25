@@ -113,6 +113,7 @@ def run_core(
     module-top comment block.
     """
     from orchestrator.admin_server import AdminServer
+    from orchestrator.app_control.channel import AppControlChannel
     from orchestrator.config import load_config
     from orchestrator.config_watcher import ConfigWatcher
     from orchestrator.ctl_server import CtlServer
@@ -155,6 +156,11 @@ def run_core(
     # Phase F: track the last config (re)load wall time for dlp-ctl status.
     config_state = {"reloaded_wall": start_wall}
 
+    # Phase AC-3: the App Control channel (created after the admin server, below).
+    # Declared here so the config-change handler + status provider can close over it
+    # even though it starts later; it stays None until then (and when disabled).
+    app_control_channel = None
+
     def _handle_config_change(new_raw: dict) -> None:
         new_data_pipe = new_raw.get("data_pipe")
         new_ctl_pipe = new_raw.get("ctl_pipe")
@@ -187,9 +193,25 @@ def run_core(
                    "server": {**new_server, "agent_id": in_use_server_section.get("agent_id", ""),
                               "url": in_use_server_section.get("url", ""),
                               "enabled": in_use_server_section.get("enabled", False)}}
+        # Apply the hot-reloadable orchestrator-side fields in place. The live
+        # PolicyManager / Dispatcher / PipeServer share this `config` object by
+        # reference, so the in-place swap is what makes a server-side reload take
+        # effect without a restart; restart-only fields (pipe names, pools, paths,
+        # proxy, …) are left frozen (see OrchestratorConfig.apply_hot_reload).
+        try:
+            changed = config.apply_hot_reload(new_raw)
+            if changed:
+                log.info("config hot-reload applied: %s", ", ".join(sorted(changed)))
+        except Exception:  # noqa: BLE001 — a bad reload must not kill the watcher thread
+            log.exception("config apply_hot_reload failed; keeping previous orchestrator config")
         raw_cell["raw"] = new_raw
         config_state["reloaded_wall"] = time.time()
         ctl_server.broadcast()
+        if app_control_channel is not None:
+            try:
+                app_control_channel.apply_config(new_raw)
+            except Exception:  # noqa: BLE001 — config errors must not break reload
+                log.exception("app_control apply_config failed")
 
     config_watcher = ConfigWatcher(watcher_path, on_change=_handle_config_change)
     config_watcher.start()
@@ -258,6 +280,8 @@ def run_core(
             "last_config_reload": _iso(config_state["reloaded_wall"]),
             "last_policy_reload": _iso(pm.last_reload_time()),
             "children": supervisor.status_snapshot() if supervisor is not None else {},
+            "app_control": (app_control_channel.status() if app_control_channel is not None
+                            else {"enabled": config.app_control_enabled, "running": False}),
         }
 
     def _reload_callback() -> dict:
@@ -286,10 +310,35 @@ def run_core(
             result["errors"] = errors
         return result
 
-    admin_server = AdminServer(config, _status_provider, _reload_callback)
+    def _appcontrol_disable(request: dict) -> dict:
+        # Phase AC-4: `dlp-ctl appcontrol disable` over the admin-pipe. Reads the
+        # later-assigned app_control_channel at call time (like _status_provider).
+        if app_control_channel is None:
+            return {"removed": False, "error": "app control channel not running"}
+        return app_control_channel.disable()
+
+    admin_server = AdminServer(
+        config, _status_provider, _reload_callback,
+        commands={"appcontrol_disable": _appcontrol_disable})
     admin_thread = threading.Thread(
         target=admin_server.run, daemon=True, name="admin-server")
     admin_thread.start()
+
+    # ── Phase AC-3: App Control (WDAC) channel — inbox watcher + deployer +
+    # event forwarder as orchestrator-internal daemon threads. Gated by config and
+    # by DLP_APPCONTROL_DISABLED (the harness opt-out; the channel needs LocalSystem
+    # privilege, exercised on the VM, not in the pipe/dispatch subprocess fixtures).
+    # Best-effort start: a failure here never stops the orchestrator.
+    if config.app_control_enabled and not os.environ.get("DLP_APPCONTROL_DISABLED"):
+        try:
+            app_control_channel = AppControlChannel(config)
+            app_control_channel.start()
+        except Exception:  # noqa: BLE001 — channel is non-critical to the agent
+            log.exception("App Control channel failed to start; continuing without it")
+            app_control_channel = None
+    else:
+        log.info("App Control channel disabled (enabled=%s, env-opt-out=%s).",
+                 config.app_control_enabled, bool(os.environ.get("DLP_APPCONTROL_DISABLED")))
 
     try:
         # Block until SvcStop sets stop_event, the pipe server dies, or (foreground)
@@ -311,6 +360,8 @@ def run_core(
         server.stop()
         ctl_server.stop()
         admin_server.stop()
+        if app_control_channel is not None:
+            app_control_channel.stop()
         t.join(timeout=5.0)
         ctl_thread.join(timeout=5.0)
         admin_thread.join(timeout=5.0)

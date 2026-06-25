@@ -23,7 +23,7 @@ def _minimal_config(tmp_path: Path) -> OrchestratorConfig:
     return OrchestratorConfig(
         data_pipe="x", ctl_pipe="x",
         clipboard_workers=1, browser_workers=1, peripheral_storage_workers=1, pipe_listeners=1,
-        max_clipboard_bytes=1, max_file_bytes=1,
+        max_file_bytes=1,
         max_restarts=3, restart_window_seconds=60, stable_uptime_reset_seconds=60,
         mitmdump_exe="", addon_script="", clipboard_exe="", controller_exe="",
         log_dir=str(tmp_path / "logs"),

@@ -51,6 +51,16 @@ _XLSX_ZIP_MARKERS = [b"xl/", b"docProps/", b"[Content_Types].xml"]
 _PPTX_ZIP_MARKERS = [b"ppt/", b"docProps/", b"[Content_Types].xml"]
 _ODT_ZIP_MARKERS = [b"content.xml", b"meta.xml", b"META-INF/"]
 
+# ODF declares its exact type in an uncompressed "mimetype" zip entry — the
+# canonical signal. Without it, .ods/.odp would all collapse to .odt, which
+# mislabels the audit log AND routes the orchestrator to the wrong extractor
+# (.odt → lxml vs .ods → calamine) — a potential under-extraction / false ALLOW.
+_ODF_MIMETYPE_TO_EXT = {
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/vnd.oasis.opendocument.spreadsheet": ".ods",
+    "application/vnd.oasis.opendocument.presentation": ".odp",
+}
+
 
 def _detect_extension_from_content(body: bytes, current_filename: str) -> str:
     """Detect file extension from magic bytes when MIME type is application/octet-stream."""
@@ -73,23 +83,37 @@ def _detect_extension_from_content(body: bytes, current_filename: str) -> str:
 
 
 def _detect_office_type_from_zip(body: bytes) -> str:
-    """Detect specific Office/ODF format from ZIP file contents."""
+    """Detect the specific Office/ODF format from ZIP file contents.
+
+    ODF (.odt/.ods/.odp) is identified by its uncompressed ``mimetype`` entry so
+    spreadsheets/presentations are not all collapsed to .odt. OOXML
+    (.docx/.xlsx/.pptx) is identified by its well-known internal folders. Falls
+    back to .odt for an ODF zip with no readable mimetype, else a generic .zip.
+    """
     try:
         import zipfile
         import io
         with zipfile.ZipFile(io.BytesIO(body)) as zf:
             names = zf.namelist()
-            # Check for ODF first (has META-INF/)
-            if any("META-INF/" in n or n == "content.xml" for n in names):
-                # Could be .odt, .ods, .odp — default to .odt for text documents
-                return ".odt"
-            # Check for Office formats
+            # ODF: the 'mimetype' entry holds the exact type (most reliable).
+            if "mimetype" in names:
+                try:
+                    mt = zf.read("mimetype").decode("ascii", "replace").strip()
+                    ext = _ODF_MIMETYPE_TO_EXT.get(mt)
+                    if ext:
+                        return ext
+                except Exception:
+                    pass
+            # OOXML formats by internal folder.
             if any(n.startswith("word/") for n in names):
                 return ".docx"
             if any(n.startswith("xl/") for n in names):
                 return ".xlsx"
             if any(n.startswith("ppt/") for n in names):
                 return ".pptx"
+            # ODF with no/unknown mimetype entry → default to a text document.
+            if any("META-INF/" in n or n == "content.xml" for n in names):
+                return ".odt"
     except Exception:
         pass
     return ".zip"  # Generic ZIP fallback
@@ -111,9 +135,21 @@ _resumable_filenames: dict = {} # upload_id → filename
 _blocked_url_cache: dict = {}           # url → expiry_time (monotonic float)
 _blocked_url_cache_lock = threading.Lock()
 _BLOCK_CACHE_TTL = 60.0                 # seconds
-# KNOWN LIMITATION: Only single-chunk uploads are intercepted
-# (Content-Range: bytes 0-N/N where N+1 equals total). Multi-chunk chunked
-# uploads would require reassembling chunks across flows, which is not supported.
+# KNOWN LIMITATION (Gmail resumable): Only single-chunk Gmail resumable uploads
+# are intercepted (Content-Range: bytes 0-N/N where N+1 equals total). Multi-chunk
+# Gmail resumable would require reassembling across flows — not supported there.
+
+# Generic chunked multipart/form-data reassembly (e.g. Zalo): large files arrive
+# as several multipart/form-data POSTs to the SAME url (query stripped) carrying
+# ?filesize=<total>&offset=<pos>. Analyzing each chunk as a whole file floods the
+# log AND breaks context proximity across chunk boundaries (a value and its
+# context word can land in different chunks → false ALLOW). We buffer the file
+# part of each chunk and analyze only the COMPLETE reassembled file. Keyed by
+# scheme://host/path (query stripped — all chunks of one upload share it).
+_chunk_lock = threading.Lock()
+_chunk_sessions: dict = {}              # session_key → {filesize,parts:{offset:bytes},filename,mime,ts}
+_CHUNK_SESSION_TTL = 600.0             # seconds; drop abandoned uploads
+_MAX_CHUNK_REASSEMBLY_BYTES = 200 * 1024 * 1024  # OOM guard; orchestrator's max_file_bytes still governs the verdict
 
 
 def load(loader):
@@ -156,7 +192,7 @@ def running():
         config_path,
         _cfg.pipe_name,
         _cfg.timeout_seconds,
-        _cfg.fail_behavior,
+        _cfg.failure_mode,
         tmp,
         _cfg.extensions or "(all)",
         _cfg.upload_url_keywords,
@@ -209,7 +245,7 @@ def _apply_ctl_update(payload: dict) -> None:
         _cfg = new_cfg
     log.info(
         "ctl: config_update applied | fail=%s timeout=%ss pipe=%s",
-        _cfg.fail_behavior, _cfg.timeout_seconds, _cfg.pipe_name,
+        _cfg.failure_mode, _cfg.timeout_seconds, _cfg.pipe_name,
     )
 
 
@@ -299,28 +335,63 @@ def request(flow: http.HTTPFlow) -> None:
                     flow.request.method, flow.request.pretty_url)
         return
 
-    # Google Drive / API style: multipart/related — extract actual file bytes and name
-    if "multipart/related" in content_type.lower():
+    ct_lower = content_type.lower()
+
+    # Google Drive / API style: multipart/related — metadata part + one file part.
+    if "multipart/related" in ct_lower:
         filename, file_body, file_mime = _parse_multipart_related(body, content_type)
         if not filename:
             log.warning("SKIP multipart/related: could not extract filename from %s", flow.request.pretty_url)
             return
-    else:
-        filename = _extract_filename(flow)
-        file_body = body
-        file_mime = content_type.split(";")[0].strip().lower()
+        _scan_file_and_apply(flow, filename, file_body, file_mime, url)
+        return
 
+    # Generic multipart/form-data (e.g. Zalo): extract EACH file part and scan it.
+    # The old behavior wrote the WHOLE multipart envelope as the file, so the
+    # analyzer read the boundary/headers instead of the content (a CSV's data
+    # collapsed to one column) → no PII detected → false ALLOW (data leak).
+    if "multipart/form-data" in ct_lower:
+        files = _parse_multipart_form_files(body, content_type)
+        if not files:
+            log.debug("SKIP multipart/form-data: no file parts | %s", url[:80])
+            return
+        # Chunked upload (e.g. Zalo): the URL carries ?filesize=&offset= — buffer
+        # and analyze the COMPLETE reassembled file instead of each 3 MB chunk.
+        q = flow.request.query
+        if "filesize" in q and "offset" in q:
+            _handle_chunked_upload(flow, files, q, url)
+            return
+        for fn, fb, fm in files:
+            if _scan_file_and_apply(flow, fn, fb, fm, url):
+                return  # blocked — 403 response already set, stop scanning parts
+        return
+
+    # Anything else: a raw-body upload — the file bytes ARE the request body.
+    filename = _extract_filename(flow)
+    file_mime = content_type.split(";")[0].strip().lower()
+    _scan_file_and_apply(flow, filename, body, file_mime, url)
+
+
+def _scan_file_and_apply(flow: http.HTTPFlow, filename: str, file_body: bytes,
+                         file_mime: str, url: str) -> bool:
+    """Write ONE extracted file to a temp path, consult the policy, and on BLOCK
+    set a 403 response + notify the user. Returns True if blocked (so a caller
+    looping over multiple parts can stop). Type-filtered files are skipped
+    (returns False). Centralizes the write→consult→respond logic so every upload
+    shape (multipart/related, multipart/form-data, raw body) scans the REAL file
+    bytes the same way."""
     if not _matches_type_filter(filename, file_mime):
         log.debug("SKIP (type filter) | %s | %s", filename, file_mime)
-        return
+        return False
 
     try:
         temp_path = _write_temp_file(file_body, filename)
     except OSError as e:
-        log.error("Failed to write temp file for '%s': %s → fail_%s", filename, e, _cfg.fail_behavior)
+        log.error("Failed to write temp file for '%s': %s → %s", filename, e, _cfg.failure_mode)
         if not _cfg.fail_open():
-            flow.kill()
-        return
+            _block_response(flow)
+            return True
+        return False
 
     payload = {
         "channel": "browser",
@@ -336,22 +407,115 @@ def request(flow: http.HTTPFlow) -> None:
 
     decision, consumer_received, reason = _consult_policy(payload)
 
-    # Temp file lifecycle: consumer is responsible for cleanup when it received the path.
-    # If the consumer never received it (pipe error/timeout), we clean up ourselves.
+    # Temp file lifecycle: the consumer owns cleanup once it received the path;
+    # if it never did (pipe error/timeout), we clean up ourselves.
     if not consumer_received:
         _delete_temp_file(temp_path)
 
     if decision == "BLOCK":
-        _cache_blocked_url(flow.request.pretty_url)
-        log.info("BLOCK | %s | %d bytes | %s", filename, len(file_body), flow.request.pretty_url)
+        _cache_blocked_url(url)
+        log.info("BLOCK | %s | %d bytes | %s", filename, len(file_body), url[:80])
         _notify_blocked(filename, reason)
-        flow.response = http.Response.make(
-            403,
-            b"Upload blocked by DLP policy.",
-            {"Content-Type": "text/plain"},
-        )
-    else:
-        log.info("ALLOW | %s | %d bytes | %s", filename, len(file_body), flow.request.pretty_url)
+        _block_response(flow)
+        return True
+
+    log.info("ALLOW | %s | %d bytes | %s", filename, len(file_body), url[:80])
+    return False
+
+
+def _block_response(flow: http.HTTPFlow) -> None:
+    """Set the standard 403 DLP block response on *flow*."""
+    flow.response = http.Response.make(
+        403, b"Upload blocked by DLP policy.", {"Content-Type": "text/plain"})
+
+
+# ---------------------------------------------------------------------------
+# Chunked multipart/form-data reassembly (Zalo-style ?filesize=&offset=)
+# ---------------------------------------------------------------------------
+
+def _session_key(flow: http.HTTPFlow) -> str:
+    """scheme://host/path (query stripped) — identifies one chunked upload
+    session; every chunk of the same file shares it (the query's offset differs)."""
+    u = urlparse(flow.request.pretty_url)
+    return f"{u.scheme}://{u.netloc}{u.path}"
+
+
+def _evict_stale_chunk_sessions() -> None:
+    """Drop chunk sessions untouched within the TTL. Caller holds _chunk_lock."""
+    now = time.monotonic()
+    for key in [k for k, s in _chunk_sessions.items() if now - s["ts"] > _CHUNK_SESSION_TTL]:
+        log.debug("evicting stale chunk session %s", key[:80])
+        del _chunk_sessions[key]
+
+
+def _handle_chunked_upload(flow: http.HTTPFlow, files: list, query, url: str) -> None:
+    """Buffer one chunk of a multipart/form-data upload (Zalo-style
+    ?filesize=&offset=) and analyze ONLY the complete reassembled file.
+
+    Intermediate chunks pass through untouched (no orchestrator call, no audit
+    line — so the log isn't flooded). When the buffered bytes reach ``filesize``
+    the whole file is scanned once via _scan_file_and_apply; a BLOCK 403s this
+    (final) chunk — which fails the whole Zalo upload — and the session is cached
+    as blocked so any retried/straggler chunk is 403'd too.
+    """
+    try:
+        filesize = int(query.get("filesize", "0"))
+        offset = int(query.get("offset", "0"))
+    except (TypeError, ValueError):
+        # Malformed chunk params — fall back to scanning this part on its own.
+        for fn, fb, fm in files:
+            if _scan_file_and_apply(flow, fn, fb, fm, url):
+                return
+        return
+
+    filename, chunk_bytes, file_mime = files[0]   # one file part per chunk
+    key = _session_key(flow)
+
+    with _chunk_lock:
+        _evict_stale_chunk_sessions()
+
+        # A session already decided BLOCK (retry/straggler) → 403 immediately.
+        if _is_blocked_url(key):
+            _block_response(flow)
+            return
+
+        # Reject implausible / too-large uploads up front (OOM guard); the
+        # orchestrator's max_file_bytes still governs normal-size verdicts.
+        if filesize <= 0 or filesize > _MAX_CHUNK_REASSEMBLY_BYTES:
+            log.warning("chunked upload filesize=%d unusable → fail %s | %s",
+                        filesize, _cfg.failure_mode, url[:80])
+            _chunk_sessions.pop(key, None)
+            if not _cfg.fail_open():
+                _cache_blocked_url(key)
+                _block_response(flow)
+            return
+
+        sess = _chunk_sessions.get(key)
+        if sess is None:
+            sess = {"filesize": filesize, "parts": {}, "filename": filename,
+                    "mime": file_mime, "ts": time.monotonic()}
+            _chunk_sessions[key] = sess
+        sess["parts"][offset] = chunk_bytes      # dedups retried offsets
+        sess["ts"] = time.monotonic()
+        if filename:
+            sess["filename"] = filename
+
+        received = sum(len(b) for b in sess["parts"].values())
+        if received < filesize:
+            log.debug("chunk buffered | %s | offset=%d received=%d/%d",
+                      sess["filename"], offset, received, filesize)
+            return  # not complete — let this chunk pass through to Zalo
+
+        # Complete: pull the assembled file out under the lock, then scan it.
+        nparts = len(sess["parts"])
+        full_bytes = b"".join(sess["parts"][o] for o in sorted(sess["parts"]))
+        fname, fmime = sess["filename"], sess["mime"]
+        _chunk_sessions.pop(key, None)
+
+    log.info("chunked upload complete | %s | %d chunks | %d bytes | %s",
+             fname, nparts, len(full_bytes), url[:80])
+    if _scan_file_and_apply(flow, fname, full_bytes, fmime, url):
+        _cache_blocked_url(key)   # block any retried final chunk too
 
 
 def response(flow: http.HTTPFlow) -> None:
@@ -862,7 +1026,7 @@ def _handle_gmail_attachments(flow: http.HTTPFlow) -> None:
 
     body = flow.request.content
     content_type = flow.request.headers.get("content-type", "")
-    attachments = _parse_gmail_attachments(body, content_type)
+    attachments = _parse_multipart_form_files(body, content_type)
 
     if not attachments:
         log.debug("SKIP Gmail upload: no extractable attachments | %s", url[:80])
@@ -1092,7 +1256,13 @@ def _notify_blocked(filename: str, reason: str) -> None:
     def _show():
         try:
             title = "Upload Blocked by DLP"
-            msg = f"File: {filename}" if not reason else f"File: {filename}\nReason: {reason}"
+            # The upload was 403'd. Google Drive (and similar) surface that 403 as
+            # a generic "network error" and keep retrying, so the user must stop
+            # the upload themselves and reload the page — tell them explicitly.
+            guidance = ("Action: Please RELOAD (refresh) the page and STOP/CANCEL this "
+                        "upload. A blocked file may cause the browser to report a network error.")
+            header = f"File: {filename}" if not reason else f"File: {filename}\nReason: {reason}"
+            msg = f"{header}\n\n{guidance}"
             kernel32 = ctypes.windll.kernel32
             kernel32.WTSGetActiveConsoleSessionId.restype = ctypes.c_uint
             session_id = kernel32.WTSGetActiveConsoleSessionId()
@@ -1114,9 +1284,12 @@ def _notify_blocked(filename: str, reason: str) -> None:
     threading.Thread(target=_show, daemon=True).start()
 
 
-def _parse_gmail_attachments(body: bytes, content_type: str) -> list[tuple[str, bytes, str]]:
+def _parse_multipart_form_files(body: bytes, content_type: str) -> list[tuple[str, bytes, str]]:
     """
-    Parse a multipart/form-data Gmail compose body and extract all file attachments.
+    Parse ANY multipart/form-data body and extract all file parts (parts with a
+    ``filename=`` in their Content-Disposition). Used for Gmail compose uploads
+    AND generic uploads from other hosts (e.g. Zalo). Decodes base64
+    Content-Transfer-Encoding so the temp file holds raw bytes.
     Returns list of (filename, file_bytes, mime_type).
     """
     attachments: list[tuple[str, bytes, str]] = []
@@ -1138,7 +1311,15 @@ def _parse_gmail_attachments(body: bytes, content_type: str) -> list[tuple[str, 
                 continue
 
             header_bytes = chunk[:header_end]
-            part_body = chunk[header_end + len(sep):].rstrip(b"\r\n")
+            part_body = chunk[header_end + len(sep):]
+            # Strip ONLY the single CRLF that precedes the boundary delimiter —
+            # a blind rstrip(b"\r\n") would also eat the file's own trailing
+            # newlines, corrupting the byte count the chunk-reassembly completion
+            # check (received == filesize) relies on (CSV chunks end in \n).
+            if part_body.endswith(b"\r\n"):
+                part_body = part_body[:-2]
+            elif part_body.endswith(b"\n"):
+                part_body = part_body[:-1]
 
             # Check for filename in Content-Disposition
             cd = _extract_cd_from_headers(header_bytes)
@@ -1285,10 +1466,10 @@ def _consult_policy(payload: dict) -> tuple:
             )
             return decision, True, reason
         except TimeoutError as e:
-            log.warning("Pipe timeout: %s → fail_%s", e, _cfg.fail_behavior)
+            log.warning("Pipe timeout: %s → %s", e, _cfg.failure_mode)
         except OSError as e:
-            log.warning("Pipe error: %s → fail_%s", e, _cfg.fail_behavior)
+            log.warning("Pipe error: %s → %s", e, _cfg.failure_mode)
         except Exception as e:
-            log.error("Unexpected pipe error: %s → fail_%s", e, _cfg.fail_behavior)
+            log.error("Unexpected pipe error: %s → %s", e, _cfg.failure_mode)
 
     return ("ALLOW" if _cfg.fail_open() else "BLOCK"), False, "Pipe communication error"

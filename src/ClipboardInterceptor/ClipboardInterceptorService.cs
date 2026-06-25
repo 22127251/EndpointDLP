@@ -8,17 +8,28 @@ namespace ClipboardInterceptor;
 /// Intercepts user clipboard copies, routes them through the agent core for analysis,
 /// and applies the decision (Allow = restore original, Block = replace with notification).
 ///
-/// Self-write detection uses string comparison:
-///   - Placeholder and block strings are matched exactly.
-///   - The most recently allowed text is held in _allowRestoreText and matched on restore.
+/// Self-write detection:
+///   - EVERY clipboard text this service writes (the analyzing placeholder AND the
+///     dynamic block notice, which now carries a per-policy/per-failure reason)
+///     begins with the DlpMarker prefix, so IsDlpAuthored() excludes them all.
+///     This is critical: the block text is no longer a fixed constant, so an
+///     exact-string match could not catch it — without the prefix guard the
+///     service would re-ingest its own block write, re-analyze it, and loop
+///     forever, completely disabling the clipboard.
+///   - The most recently allowed text is held in _allowRestoreText (real user
+///     text, not marker-prefixed) and matched on restore.
 ///
 /// Concurrent copies cancel the in-flight analysis via CancellationToken. Only the
 /// decision whose ID matches _currentAnalysisId is applied; stale decisions are discarded.
 /// </summary>
 public sealed class ClipboardInterceptorService
 {
+    // Prefix shared by EVERY clipboard text this service writes (placeholder +
+    // block notice). IsDlpAuthored() uses it to exclude our own writes from
+    // re-analysis — the guard that keeps the dynamic block text from looping.
+    private const string DlpMarker = "[DLP";
     private const string Placeholder = "[DLP: Analyzing...]";
-    private const string BlockNotification = "[DLP: Content Blocked]";
+    private const string BlockFallback = "[DLP] Content blocked";
 
     private readonly IAgentCore _agentCore;
     private string? _allowRestoreText;
@@ -36,8 +47,10 @@ public sealed class ClipboardInterceptorService
         if (!Clipboard.ContainsText()) return;
         string content = Clipboard.GetText();
 
-        // Ignore our own writes
-        if (content == Placeholder || content == BlockNotification) return;
+        // Ignore our own writes (placeholder + any dynamic block notice). Prefix
+        // match, NOT equality — the block text is dynamic, so equality would miss
+        // it and the service would analyze its own write in an endless loop.
+        if (IsDlpAuthored(content)) return;
         if (_allowRestoreText != null && content == _allowRestoreText) return;
         _allowRestoreText = null; // new user content — clear the allow restore guard
 
@@ -59,12 +72,12 @@ public sealed class ClipboardInterceptorService
         {
             SetOwnClipboardText(Placeholder);
 
-            AnalysisDecision decision = await _agentCore.AnalyseAsync(content, ct);
+            AnalysisOutcome outcome = await _agentCore.AnalyseAsync(content, ct);
 
             // Discard stale decisions from superseded analyses
             if (_currentAnalysisId != id) return;
 
-            if (decision == AnalysisDecision.Allow)
+            if (outcome.Decision == AnalysisDecision.Allow)
             {
                 _allowRestoreText = content;
                 SetOwnClipboardText(content);
@@ -72,7 +85,10 @@ public sealed class ClipboardInterceptorService
             }
             else
             {
-                SetOwnClipboardText(BlockNotification);
+                // The replacement text carries the end-user reason and is
+                // marker-prefixed (BlockFallback / BuildBlockText) so IsDlpAuthored
+                // excludes it from re-analysis.
+                SetOwnClipboardText(BuildBlockText(outcome.Reason));
                 Console.WriteLine("[DLP] Decision: BLOCK — content replaced.");
             }
         }
@@ -101,4 +117,17 @@ public sealed class ClipboardInterceptorService
             }
         }
     }
+
+    /// <summary>True if <paramref name="content"/> is one of THIS service's own
+    /// clipboard writes (placeholder or block notice). Prefix match on DlpMarker —
+    /// the loop guard that lets the block text carry a dynamic reason without the
+    /// service re-analyzing its own output. Public for unit testing.</summary>
+    public static bool IsDlpAuthored(string content) =>
+        content.StartsWith(DlpMarker, StringComparison.Ordinal);
+
+    /// <summary>The clipboard replacement text for a BLOCK. Always DlpMarker-prefixed
+    /// (so IsDlpAuthored excludes it). Carries the end-user reason when one was
+    /// returned; otherwise a generic notice. Public for unit testing.</summary>
+    public static string BuildBlockText(string? reason) =>
+        string.IsNullOrWhiteSpace(reason) ? BlockFallback : $"[DLP] Blocked: {reason}";
 }

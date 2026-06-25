@@ -7,10 +7,15 @@
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <UseAppHost>true</UseAppHost>
+    <!-- ClipboardInterceptor (referenced below for the self-write-guard tests)
+         is a WinForms app, so the test host must opt into the Windows Desktop
+         framework to load it. -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\AgentCore\AgentCore.csproj" />
+    <ProjectReference Include="..\ClipboardInterceptor\ClipboardInterceptor.csproj" />
   </ItemGroup>
 
   <ItemGroup>

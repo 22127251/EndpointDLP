@@ -1,13 +1,25 @@
 policies:
 
-  # --- Chặn đưa thẻ VISA ở cả 3 kênh ---
-  - id: block_visa_all_channels_with_context
-    name: Block Visa Card in on all channels with Context
+  # === Confidence-scoring model ============================================
+  # Every shape match is detected + counted (verify.py-equivalent recall).
+  # Context only RAISES the score; it never drops a match. Defaults are the same
+  # for every policy: score_base 0.5, score_context_boost 0.5 → two clean bands:
+  # no-context = 0.5, has-context = 1.0. `actions` (the ONLY action field) maps
+  # score → action; admins retune thresholds (e.g. set the block floor to 0.5 to
+  # block even bare values). Each match records WHICH context word boosted it.
+  # =========================================================================
+
+  # --- Thẻ VISA: có ngữ cảnh → BLOCK, chỉ đúng định dạng → ghi log ---
+  - id: block_visa_all_channels
+    name: Block Visa Card (confidence-scored)
+    # user_message: shown to the end user on a block (browser popup, clipboard
+    # replacement text, Transfer Agent Note). Never shows the policy id.
+    user_message: "Credit card number (Visa) detected"
     channels: [browser, clipboard, peripheral_storage]
-    action: block
     type: regex
     patterns:
-      - "\\b4[0-9]{3}(?:\\s?[0-9]{4}){3}\\b"      # Định dạng thẻ Visa (16 số, nhóm 4, có thể cách nhau bằng khoảng trắng)
+      # Thẻ Visa 16 số bắt đầu bằng 4, nhóm 4 số, khoảng trắng tùy chọn (khớp verify.py)
+      - "\\b4\\d{3} ?\\d{4} ?\\d{4} ?\\d{4}\\b"
     context_words:
       - "credit card"
       - "thẻ tín dụng"
@@ -16,16 +28,22 @@ policies:
       - "thẻ"
       - "visa"
     context_range: 120
+    score_base: 0.5
+    score_context_boost: 0.5
+    actions:
+      - { min_score: 1.0, action: block }       # định dạng + ngữ cảnh → chặn
+      - { min_score: 0.0, action: allow_log }    # chỉ đúng định dạng → ghi log
 
-  # --- Chặn đưa CCCD ở cả 3 kênh ---
-  - id: block_cccd_all_channels_with_context
-    name: Block Vietnamese Citizen ID (CCCD) in on all channels with Context
+  # --- CCCD: có ngữ cảnh → BLOCK, chỉ đúng định dạng → ghi log ---
+  #     (gộp cả bản "clipboard không cần ngữ cảnh" cũ: nay là dải điểm no-context)
+  - id: block_cccd_all_channels
+    name: Block Vietnamese Citizen ID CCCD (confidence-scored)
+    user_message: "Vietnamese Citizen ID (CCCD/CMND) detected"
     channels: [browser, clipboard, peripheral_storage]
-    action: block
     type: regex
     patterns:
-      # CCCD 12 số: mã tỉnh/thành + thế kỷ/giới tính + năm sinh + số ngẫu nhiên
-      - "\\b0[0-9]{2}[0-3][0-9]{8}\\b"
+      # CCCD: chuỗi đúng 12 chữ số (khớp verify.py)
+      - "\\b\\d{12}\\b"
     context_words:
       - "CCCD"
       - "căn cước"
@@ -35,45 +53,25 @@ policies:
       - "số định danh"
       - "định danh cá nhân"
     context_range: 200
+    score_base: 0.5
+    score_context_boost: 0.5
+    actions:
+      - { min_score: 1.0, action: block }
+      - { min_score: 0.0, action: allow_log }
 
-# --- Chặn đưa CCCD vào Clipboard mà không có từ khóa ngữ cảnh ---
-  - id: block_cccd_clipboard_no_context
-    name: Block Vietnamese Citizen ID (CCCD) in Clipboard with no Context words
-    channels: [clipboard]
-    action: block
-    type: regex
-    patterns:
-      # CCCD 12 số: mã tỉnh/thành + thế kỷ/giới tính + năm sinh + số ngẫu nhiên
-      - "\\b0[0-9]{2}[0-3][0-9]{8}\\b"
-
-
-  # # --- Chặn từ khóa liên quan đến Bí mật / Nội bộ vào Browser ---
-  # - id: block_confidential_keywords_browser
-  #   name: Block Confidential Keywords in Browser
-  #   channels: [browser, clipboard]
-  #   action: block
-  #   type: denylist
-  #   keywords:
-  #     - "mật"
-  #     - "bí mật"
-  #     - "tuyệt mật"
-  #     - "nội bộ"
-  #     - "confidential"
-  #     - "top secret"
-  #     - "strictly confidential"
-  #   context_words: []
-  #   context_range: 0
-
-  # --- Cho phép và Ghi Log (Allow & Log) Số điện thoại ở cả 3 kênh ---
-  - id: log_phone_numbers_browser
-    name: Log Phone Numbers in Browser
+  # --- Số điện thoại: chính sách giám sát → luôn allow_log (context_word vẫn ghi nhận) ---
+  - id: log_phone_numbers
+    name: Log Phone Numbers (confidence-scored)
+    # allow_log only (never blocks) — user_message is here for completeness in
+    # case an admin raises it to a block action.
+    user_message: "Phone number detected"
     channels: [browser, clipboard, peripheral_storage]
-    action: allow_log
     type: regex
     patterns:
-      # Định dạng số điện thoại Việt Nam (10 số, bắt đầu bằng 03, 05, 07, 08, 09 hoặc +84)
-      - "\\b0[35789][0-9]{8}\\b"
-      - "\\+84[35789][0-9]{8}\\b"
+      # Số điện thoại Việt Nam, 3 dạng khớp verify.py:
+      - "\\b0\\d{2} \\d{3} \\d{4}\\b"   # nhóm cách: 096 123 4567
+      - "\\+84\\d{9}\\b"               # quốc tế:  +84961234567
+      - "\\b0\\d{9}\\b"                # liền:     0961234567
     context_words:
       - "số điện thoại"
       - "sđt"
@@ -82,3 +80,35 @@ policies:
       - "liên hệ"
       - "hotline"
     context_range: 100
+    score_base: 0.5
+    score_context_boost: 0.5
+    actions:
+      - { min_score: 0.0, action: allow_log }    # luôn ghi log
+
+  # --- Từ khóa Bí mật / Nội bộ (denylist, khớp NGUYÊN TỪ) ---
+  #     Denylist cũng dùng được ngữ cảnh: gần một context_word → điểm cao hơn → chặn.
+  #     context_words dưới đây chỉ là VÍ DỤ minh họa, admin tự điều chỉnh.
+  - id: block_confidential_keywords
+    name: Block Confidential Keywords (confidence-scored)
+    user_message: "Confidential/internal document keyword detected"
+    channels: [browser, peripheral_storage]
+    type: denylist
+    keywords:
+      - "mật"
+      - "bí mật"
+      - "tuyệt mật"
+      - "nội bộ"
+      - "confidential"
+      - "top secret"
+      - "strictly confidential"
+    context_words:                      # VÍ DỤ: từ khóa gần các từ này → coi là tài liệu mật thật
+      - "tài liệu"
+      - "văn bản"
+      - "phân loại"
+      - "đóng dấu"
+    context_range: 120
+    score_base: 0.5
+    score_context_boost: 0.5
+    actions:
+      - { min_score: 1.0, action: block }       # từ khóa + ngữ cảnh → chặn
+      - { min_score: 0.0, action: allow_log }    # chỉ từ khóa → ghi log
