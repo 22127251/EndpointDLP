@@ -370,6 +370,112 @@ Reboot the VM → the service should **auto-start** (no manual start needed).
 
 ---
 
+# §C — Connect the agent to the Management Console (server)
+
+Everything above runs the agent **standalone** (local `policies.yaml`, local `dlp-ctl`). This section connects an installed agent to the **Management Console** server so it appears in the web UI, sends heartbeats/logs, and receives server-authored policies. It is **optional** — `server.enabled: false` (the default) keeps the agent fully standalone and changes nothing above.
+
+> **Topology used here:** the **server** runs in Docker on the **dev box**; the **agent** runs on the clean **VM**, reaching the dev box over **VMware NAT**. The server lives only in Docker (reversible), so it never touches the dev box's WDAC/service state.
+
+> **Phase note (current capability):** connecting makes the agent go **ACTIVE** in the console, advances `last_seen`, ships log tails, and **delivers** assigned policies to the agent's `analyzer/policies.yaml`. **Server-pushed policies are delivered but do not enforce yet** — local `policies.yaml` still governs blocking. Full server-driven enforcement (score ladder + violation reporting) lands in a later integration phase (`agent-server-integration-plan.md`, Phase 1). Connecting does **not** weaken standalone enforcement.
+
+## C.1 Deploy the server (dev box, Docker)
+
+Requires **Docker Desktop** running. From the repo:
+
+```powershell
+cd src\management_console
+docker compose up -d --build      # builds backend+frontend images, starts db/backend:8000/frontend:80
+docker compose ps                 # expect 3 containers Up (ports 8000, 5432, 80)
+```
+
+`server\.env` already ships with working PoC values (admin `admin` / `admin123`, `SECRET_KEY`, `CORS_ORIGINS=["*"]`); compose overrides `DATABASE_URL` to the `db` container, so no edit is needed to start. On startup the backend runs `alembic upgrade head` and seeds the admin + settings. Verify:
+
+```powershell
+curl.exe -s -o NUL -w "api=%{http_code}`n" http://localhost:8000/openapi.json   # 200 (also browse /docs)
+curl.exe -s -o NUL -w "ui=%{http_code}`n"  http://localhost/                     # 200
+```
+
+Open **http://localhost/** and log in `admin` / `admin123`.
+
+> ✅ **MANUALLY TESTED** (2026-06-26) — `docker compose up -d --build` built both images (`node:26-alpine` + `python:3.13-slim`), ran the alembic chain, seeded the admin, and brought all 3 containers Up; `/openapi.json`→`EndpointDLP`, UI→200, admin login returned a JWT.
+
+## C.2 Open VM→dev-box connectivity (NAT + firewall)
+
+With VMware **NAT**, the VM reaches the dev box at the host's **VMnet8** adapter IP. Find it on the dev box:
+
+```powershell
+Get-NetIPAddress -AddressFamily IPv4 | Where-Object InterfaceAlias -like 'VMware*VMnet8*' | Select IPAddress
+# author's dev box: 192.168.6.1
+```
+
+Docker publishes port 8000 on all interfaces; allow it through the dev-box firewall (elevated):
+
+```powershell
+New-NetFirewallRule -DisplayName 'DLP Server 8000' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8000 -Profile Any
+```
+
+From the **VM**, confirm reachability:
+
+```powershell
+Test-NetConnection 192.168.6.1 -Port 8000   # expect TcpTestSucceeded : True
+```
+
+The admin can drive the UI from the **dev box's own browser** (`http://localhost/`), so a port-80 rule is only needed to open the UI *from the VM*. Undo later with `Remove-NetFirewallRule -DisplayName 'DLP Server 8000'`.
+
+> ✅ **MANUALLY TESTED** (2026-06-26) — the `New-NetFirewallRule` rule was added on the dev box and the live VM→`192.168.6.1:8000` round-trip (`Test-NetConnection`) succeeded.
+
+## C.3 Create the agent in the UI (admin enrollment), copy its UUID
+
+1. In the UI: **Agents → create**. Enter a hostname; set status **`inactive`** (so you can watch it flip to ACTIVE on the first heartbeat). Save.
+2. Copy the agent's **UUID** shown under the hostname.
+3. *(Optional)* **Policies → create** a policy and assign it to this agent (or its group) so you can see it delivered to the VM's `policies.yaml`.
+
+> ✅ **MANUALLY TESTED** (2026-06-26) — logging in and creating the agent (then copying its UUID) was verified end-to-end. **Step 3 (the optional policy create + assign) was NOT exercised** — server-pushed policies are delivered but do not enforce on the current agent, so it is deferred to Phase 1 (`agent-server-integration-plan.md`).
+
+## C.4 Point the agent at the server (VM), restart
+
+Edit the **installed** config **`C:\Program Files\DLP\config.yaml`** → `server:` block:
+
+```yaml
+server:
+  url: "http://192.168.6.1:8000"   # BARE origin; the agent appends /api/v1 itself
+  agent_id: "<UUID copied in C.3>"
+  heartbeat_interval: 30
+  log_sync_interval: 300
+  enabled: true                    # flips standalone → cloud mode
+```
+
+The `server:` block is **restart-only** (it is not hot-reloadable — see the Appendix). Apply it:
+
+```powershell
+Restart-Service DLPAgent
+```
+
+**Order matters:** complete C.1–C.2 (server up, firewall open, probe green) **before** the restart. If the server is unreachable when the agent starts and an `agent_id` is set, the agent keeps the configured id and retries on the heartbeat loop (it will go ACTIVE once the server is reachable).
+
+## C.5 Verify the connection
+
+**On the VM:**
+
+```powershell
+Get-Content C:\ProgramData\DLP\logs\dlp-agent.log -Tail 60   # expect "Cloud bridge: started (agent_id=…)" + recurring heartbeats
+```
+
+**On the dev box (UI):**
+- **Agents** page: the row shows **ACTIVE** with `last_seen` advancing every ~30 s.
+- **Agent Logs** page: log tails pushed from the VM appear.
+- If you assigned a policy in C.3: the VM's `C:\Program Files\DLP\analyzer\policies.yaml` gains the auto-generated header + the delivered policy after a heartbeat.
+
+> ✅ **MANUALLY TESTED** (2026-06-26) — on the VM the agent connected after the `config.yaml` `server:` edit + `Restart-Service DLPAgent`: `dlp-agent.log` showed the cloud-bridge start + recurring heartbeats, and the console **Agents** page showed the row **ACTIVE** with `last_seen` advancing and pushed log tails on **Agent Logs**. The last bullet (an assigned policy appearing in the VM's `policies.yaml`) was **NOT** exercised — deferred to Phase 1 with the rest of policy delivery/enforcement.
+
+## C.6 Teardown / back to standalone
+
+- **Disconnect an agent:** set `server.enabled: false` in `C:\Program Files\DLP\config.yaml` + `Restart-Service DLPAgent` (pure standalone again).
+- **Stop the server (clean):** from `src\management_console`, `docker compose down -v` (removes containers + network **and** the DB volume — next `up` starts from a fresh, re-seeded DB). Drop the `-v` only if you want to keep the DB between runs. Optional: `docker image rm management_console-backend management_console-frontend`.
+- **Firewall:** `Remove-NetFirewallRule -DisplayName 'DLP Server 8000'`.
+
+---
+
 ## Appendix — file & config quick reference
 
 | What | Source (repo, gets installed) | Installed (dev box **or** VM) | Automated tests |
@@ -386,6 +492,6 @@ Reboot the VM → the service should **auto-start** (no manual start needed).
 
 `failure_mode` (`fail_closed`→BLOCK default | `fail_open`→ALLOW) is unified across channels for every analysis/pipe failure.
 
-**Hot-reloadable** (apply on `dlp-ctl reload` or `config.yaml` save, **no restart**): every per-component client field above, plus the orchestrator's own `failure_mode`, `limits.max_file_bytes`, `analyzer.max_extracted_chars`, `analyzer.supported_extensions`, `service.analysis_timeout_seconds`, and `service.drain_timeout_seconds`. (Before this change the orchestrator froze its own settings at startup and only the client sections + App Control reloaded — that gap is fixed; see `orchestrator/config.py::apply_hot_reload`.) **Restart-only:** the pipe names, `pools`/`pipe_listeners`, `paths.*`, `proxy.*`, `policies_file`, `supervisor.*`, and `install.*` (the agent logs a "requires restart" warning if a pipe name is changed). `peripheral_storage.controller.shared_memory_name` is likewise rejected at runtime by the Controller.
+**Hot-reloadable** (apply on `dlp-ctl reload` or `config.yaml` save, **no restart**): every per-component client field above, plus the orchestrator's own `failure_mode`, `limits.max_file_bytes`, `analyzer.max_extracted_chars`, `analyzer.supported_extensions`, `service.analysis_timeout_seconds`, and `service.drain_timeout_seconds`. (Before this change the orchestrator froze its own settings at startup and only the client sections + App Control reloaded — that gap is fixed; see `orchestrator/config.py::apply_hot_reload`.) **Restart-only:** the pipe names, `pools`/`pipe_listeners`, `paths.*`, `proxy.*`, `policies_file`, `supervisor.*`, `install.*`, and `server.*` (the Management Console connection — see §C; `agent_id` changing mid-flight would break heartbeat identity, so it is read once at startup) (the agent logs a "requires restart" warning if a pipe name is changed). `peripheral_storage.controller.shared_memory_name` is likewise rejected at runtime by the Controller.
 
 **Policy rules live separately in `analyzer/policies.yaml`** (policy ≠ config). Each policy may set a `user_message:` — the end-user block reason (in **English**) shown on the browser popup, the clipboard replacement text, and the Transfer Agent Note (the policy `id` is never shown). It is hot-reloadable via `dlp-ctl reload`. Failure-mode blocks (timeout/oversize/text_cap/unsupported/…) instead show a per-category English message defined in `orchestrator/messages.py`. **All end-user notifications across every channel are in English.**

@@ -170,7 +170,12 @@ class CloudBridge:
         """Ensure we have a valid agent_id. Returns the agent_id.
 
         Flow:
-        1. If agent_id already set → try heartbeat; if 404 → re-register
+        1. If agent_id already set → try heartbeat; if 200 → use it; if 404 →
+           re-register; on any *other* (transient) outcome — network down, 5xx,
+           auth — KEEP the configured id and return it so the heartbeat loop can
+           retry. We must NOT fall through to /register in that case: /register is
+           admin-JWT-guarded, so an agent call gets 403, which would drop us to
+           standalone until the next service restart.
         2. If agent_id empty → register by hostname
         3. If hostname conflict (400) → lookup by hostname
         """
@@ -185,6 +190,16 @@ class CloudBridge:
             if status == 404:
                 log.warning("Agent %s not found on server, re-registering", self._agent_id)
                 self._agent_id = ""
+            else:
+                # Transient failure (network unreachable / 5xx / auth): trust the
+                # admin-configured agent_id and let the heartbeat loop retry rather
+                # than falling back to the admin-only /register (which would 403).
+                log.warning(
+                    "Cloud bridge: heartbeat for configured agent_id %s returned %s; "
+                    "keeping it and retrying via the heartbeat loop",
+                    self._agent_id, status,
+                )
+                return self._agent_id
 
         hostname = socket.gethostname()
         status, resp = self._post(

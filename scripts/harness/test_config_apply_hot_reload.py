@@ -69,6 +69,10 @@ _BASE: dict = {
         "poll_seconds": 3, "reconcile_interval_seconds": 30,
         "forward_block_events": True, "extra_paths": [],
     },
+    "server": {
+        "url": "", "agent_id": "", "heartbeat_interval": 30,
+        "log_sync_interval": 300, "enabled": False,
+    },
 }
 
 
@@ -153,6 +157,16 @@ _NONRELOAD_CASES = [
      lambda c: c.restart_window_seconds),
     ("stable_uptime_reset_seconds", _set(["supervisor", "stable_uptime_reset_seconds"], 99),
      lambda c: c.stable_uptime_reset_seconds),
+    # cloud bridge (server:) — restart-only. config.py marks these NOT hot-reloadable
+    # (an agent_id change mid-flight would break heartbeat identity); CloudBridge reads
+    # them once at startup in __main__.py.
+    ("server_url", _set(["server", "url"], "http://changed:8000"), lambda c: c.server_url),
+    ("server_agent_id", _set(["server", "agent_id"], "CH"), lambda c: c.server_agent_id),
+    ("server_heartbeat_interval", _set(["server", "heartbeat_interval"], 99),
+     lambda c: c.server_heartbeat_interval),
+    ("server_log_sync_interval", _set(["server", "log_sync_interval"], 99),
+     lambda c: c.server_log_sync_interval),
+    ("server_enabled", _set(["server", "enabled"], True), lambda c: c.server_enabled),
     ("app_control_enabled", _set(["app_control", "enabled"], False), lambda c: c.app_control_enabled),
     ("app_control_inbox_dir", _set(["app_control", "inbox_dir"], "CH"), lambda c: c.app_control_inbox_dir),
     ("app_control_rejected_dir", _set(["app_control", "rejected_dir"], "CH"),
