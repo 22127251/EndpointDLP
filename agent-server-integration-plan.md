@@ -159,6 +159,36 @@ optional policy-assignment check was skipped for that reason.)*
 
 ## Phase 1 — Policies become score-based + violations report (core DLP works)
 
+> ✅ **DONE + VM-verified (2026-06-27).** Sub-plan: `phase1-policies-violations-plan.md`.
+> Server-authored **score-ladder** policies now enforce on the clean VM (card+context →
+> BLOCK with `user_message`; without context → allow_log), and the console's **Violation
+> Logs** show the events with matched policies + a `reason` filter.
+>
+> **Design decisions taken in-session (refined from the sketch below):**
+> - **Dropped the single `action` column** entirely; the `actions` ladder is the sole
+>   mechanism (kept the `PolicyAction` enum for the rung dropdown + violation rows).
+> - **Violations are EVENT-CENTRIC + normalized**, not "one POST per matched policy":
+>   **one POST per notable decision** → a parent `violation_logs` row (decision/reason/
+>   channel) + a **`violation_policy_matches`** child row per triggered policy. Recorded
+>   when the event has `violations` **or** a failure `reason` — so policy blocks,
+>   `allow_log` hits, `fail_closed` blocks, and **`fail_open` allows** are all captured,
+>   queryable by `reason`. No fabricated "deciding policy". The child's per-policy
+>   context field is `context_words_triggered` (renamed everywhere incl. `events.jsonl`).
+> - **Migration via autogenerate** (real id `56fbe7339e73`; `alembic check` = zero diff
+>   for Phase-1 tables). **New server test suite** (`server/tests/`, pytest + httpx).
+> - **Conflict #2 was two issues:** (a) a stored control char, guarded at create/update
+>   + defensive strip in `translate_policies`; (b) **regex double-backslash** — a pattern
+>   copied from the reference's double-quoted YAML stored `\\` literally → plain-scalar
+>   emission → never matched. Fixed by single-quoting `analyzer/policies.yaml`, a UI
+>   hint + double-`\` confirm, and a server warning (see sub-plan §I). *No agent
+>   YAML-quoting change was needed/possible — PyYAML dump/load is identity.*
+>
+> **Verified:** agent harness 243/3, 12 server tests, migration + `alembic check`,
+> frontend build, a 21-check live e2e smoke, and the full VM end-to-end.
+> *(Known pre-existing drift left untouched: `agent_logs` indexes +
+> `policy_agent_assignments` `onupdate` from migration `c8d9e0f1a2b3` — a candidate for a
+> separate cleanup migration, not folded into Phase 1.)*
+
 **Goal:** a policy authored in the UI actually **blocks** on the VM and the block
 shows up in the server's Violation Logs. Fixes conflicts #1, #2, #3 (decision D2).
 

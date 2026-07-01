@@ -376,7 +376,9 @@ Everything above runs the agent **standalone** (local `policies.yaml`, local `dl
 
 > **Topology used here:** the **server** runs in Docker on the **dev box**; the **agent** runs on the clean **VM**, reaching the dev box over **VMware NAT**. The server lives only in Docker (reversible), so it never touches the dev box's WDAC/service state.
 
-> **Phase note (current capability):** connecting makes the agent go **ACTIVE** in the console, advances `last_seen`, ships log tails, and **delivers** assigned policies to the agent's `analyzer/policies.yaml`. **Server-pushed policies are delivered but do not enforce yet** — local `policies.yaml` still governs blocking. Full server-driven enforcement (score ladder + violation reporting) lands in a later integration phase (`agent-server-integration-plan.md`, Phase 1). Connecting does **not** weaken standalone enforcement.
+> **Phase note (current capability):** connecting makes the agent go **ACTIVE** in the console, advances `last_seen`, ships log tails, and **delivers** assigned policies to the agent's `analyzer/policies.yaml`.
+>
+> ✅ **Phase 1 done + VM-verified (2026-06-27).** Server-authored policies are now **score-based and enforce** on the VM (the UI exposes `score_base`/`score_context_boost` + an action ladder + a block reason), and the agent reports every **notable** decision back to the console's **Violation Logs** as one event with its matched policies — policy blocks, monitored `allow_log` hits, and failure-mode outcomes (`fail_closed` BLOCK / `fail_open` ALLOW), all queryable by `reason`. **When authoring a policy, enter regex patterns with SINGLE backslashes** (e.g. `\b\d{12}\b`) — the UI warns on a double-backslash paste. See `agent-server-integration-plan.md` Phase 1 + `phase1-policies-violations-plan.md`. Connecting does **not** weaken standalone enforcement.
 
 ## C.1 Deploy the server (dev box, Docker)
 

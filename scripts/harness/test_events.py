@@ -100,11 +100,11 @@ def test_browser_block_event_has_violation_ids(events_capture):
     rec = json.loads(events_capture[0])
     assert rec["decision"] == "BLOCK"
     assert rec["reason"] == "policy_violation"   # machine category in the audit log
-    # violations are {policy_id, count, action, with_context, context_words} objects;
-    # _Violation has matches=["m"] (no has_context) → count 1, with_context 0.
+    # violations are {policy_id, action, count, with_context, context_words_triggered}
+    # objects; _Violation has matches=["m"] (no has_context) → count 1, with_context 0.
     assert rec["violations"] == [
-        {"policy_id": "block_visa_browser", "count": 1, "action": "block",
-         "with_context": 0, "context_words": []}]
+        {"policy_id": "block_visa_browser", "action": "block", "count": 1,
+         "with_context": 0, "context_words_triggered": []}]
 
 
 def test_browser_block_no_user_message_falls_back_to_generic(events_capture):
@@ -141,8 +141,8 @@ def test_peripheral_block_now_sends_reason(events_capture):
     assert rec["channel"] == "peripheral_storage"
     assert rec["reason"] == "policy_violation"
     assert rec["violations"] == [
-        {"policy_id": "block_cccd", "count": 1, "action": "block",
-         "with_context": 0, "context_words": []}]
+        {"policy_id": "block_cccd", "action": "block", "count": 1,
+         "with_context": 0, "context_words_triggered": []}]
     assert rec["name"] == "id.docx"
 
 

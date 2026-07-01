@@ -7,6 +7,12 @@ policies:
   # no-context = 0.5, has-context = 1.0. `actions` (the ONLY action field) maps
   # score → action; admins retune thresholds (e.g. set the block floor to 0.5 to
   # block even bare values). Each match records WHICH context word boosted it.
+  #
+  # Regex `patterns` are SINGLE-QUOTED YAML scalars ('...') so the text IS the regex
+  # (backslashes are literal — no escaping). When authoring a policy in the server UI,
+  # type the pattern exactly as it appears between the quotes, e.g.  \b\d{12}\b  — a
+  # SINGLE backslash. Do NOT copy a double-quoted/double-backslash form ("\\b\\d{12}\\b")
+  # into the UI: that stores a literal "\\" which never matches.
   # =========================================================================
 
   # --- Thẻ VISA: có ngữ cảnh → BLOCK, chỉ đúng định dạng → ghi log ---
@@ -19,7 +25,7 @@ policies:
     type: regex
     patterns:
       # Thẻ Visa 16 số bắt đầu bằng 4, nhóm 4 số, khoảng trắng tùy chọn (khớp verify.py)
-      - "\\b4\\d{3} ?\\d{4} ?\\d{4} ?\\d{4}\\b"
+      - '\b4\d{3} ?\d{4} ?\d{4} ?\d{4}\b'
     context_words:
       - "credit card"
       - "thẻ tín dụng"
@@ -43,7 +49,7 @@ policies:
     type: regex
     patterns:
       # CCCD: chuỗi đúng 12 chữ số (khớp verify.py)
-      - "\\b\\d{12}\\b"
+      - '\b\d{12}\b'
     context_words:
       - "CCCD"
       - "căn cước"
@@ -69,9 +75,9 @@ policies:
     type: regex
     patterns:
       # Số điện thoại Việt Nam, 3 dạng khớp verify.py:
-      - "\\b0\\d{2} \\d{3} \\d{4}\\b"   # nhóm cách: 096 123 4567
-      - "\\+84\\d{9}\\b"               # quốc tế:  +84961234567
-      - "\\b0\\d{9}\\b"                # liền:     0961234567
+      - '\b0\d{2} \d{3} \d{4}\b'   # nhóm cách: 096 123 4567
+      - '\+84\d{9}\b'              # quốc tế:  +84961234567
+      - '\b0\d{9}\b'               # liền:     0961234567
     context_words:
       - "số điện thoại"
       - "sđt"

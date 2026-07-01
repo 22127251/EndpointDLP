@@ -18,6 +18,7 @@ from app.models.policy_assignment import policy_group_assignments, policy_agent_
 from app.models.setting import ServerConfiguration
 from app.models.user import User
 from app.models.violation_log import ViolationLog
+from app.models.violation_policy_match import ViolationPolicyMatch
 
 # get setting from env
 from app.config import get_settings

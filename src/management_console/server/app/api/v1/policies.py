@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +13,24 @@ from app.models.agent import Agent
 from app.models.agent_group import AgentGroup
 from app.services.audit_log_service import add_audit_log
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/policies", tags=["Policies"])
+
+
+def _warn_double_backslash(patterns, name) -> None:
+    """Warn (don't block) when a regex pattern contains a literal double backslash.
+    For DLP PII regexes that's almost always a YAML-escaped form copied by mistake
+    (it stores a literal "\\" and never matches). We log rather than auto-rewrite so a
+    genuinely-intended escaped pattern is never silently corrupted."""
+    for p in patterns or []:
+        if isinstance(p, str) and "\\\\" in p:
+            log.warning(
+                "Policy %r pattern %r contains a double backslash — likely a "
+                "YAML-escaped form copied into the UI; it will not match. Enter the "
+                "raw regex with single backslashes (e.g. \\b\\d{12}\\b).", name, p,
+            )
+            break
 
 
 @router.get("/", response_model=dict)
@@ -61,6 +79,7 @@ async def create_policy(
     current_user: User = Depends(get_current_user),
 ):
     data = policy_data.model_dump(mode="json")
+    _warn_double_backslash(data.get("patterns"), data.get("name"))
     policy = Policy(**data)
     db.add(policy)
 
@@ -113,6 +132,8 @@ async def update_policy(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy not found")
     
     update_data = policy_data.model_dump(exclude_unset=True)
+    if "patterns" in update_data:
+        _warn_double_backslash(update_data.get("patterns"), policy.name)
     for key, value in update_data.items():
         setattr(policy, key, value)
 

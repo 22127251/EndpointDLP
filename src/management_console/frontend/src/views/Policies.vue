@@ -58,11 +58,13 @@
             <el-tag size="small" effect="plain">{{ row.type?.toUpperCase() }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="ACTION" width="120">
+        <el-table-column label="ACTION" width="160">
           <template #default="{ row }">
-            <el-tag :type="getActionType(row.action)" effect="dark">
-              {{ row.action.toUpperCase() }}
-            </el-tag>
+            <el-tooltip :content="ladderSummary(row)" placement="top">
+              <el-tag :type="getActionType(topAction(row))" effect="dark">
+                {{ topAction(row).toUpperCase() }}
+              </el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="STATUS" width="100">
@@ -142,15 +144,11 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="Action">
-              <el-select v-model="form.action" style="width: 100%">
-                <el-option
-                  v-for="a in constants.actions"
-                  :key="a"
-                  :label="a.toUpperCase()"
-                  :value="a"
-                />
-              </el-select>
+            <el-form-item label="Block Reason (shown to the user)">
+              <el-input
+                v-model="form.user_message"
+                placeholder="e.g. Credit card number detected"
+              />
             </el-form-item>
           </el-col>
         </el-row>
@@ -202,6 +200,7 @@
                 >
                   {{ field.addLabel || `Add ${field.label.slice(0, -1)}` }}
                 </el-button>
+                <div v-if="field.hint" class="field-hint field-hint-block">{{ field.hint }}</div>
               </template>
 
               <!-- Number input -->
@@ -216,6 +215,64 @@
               </template>
             </el-form-item>
           </template>
+        </div>
+
+        <!-- SCORING + ACTION LADDER (the sole action mechanism) -->
+        <div class="rule-section">
+          <div class="section-label">Detection Scoring &amp; Action Ladder</div>
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-form-item label="Base Score (format match)">
+                <el-input-number v-model="form.score_base" :min="0" :max="2" :step="0.1" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Context Boost (nearby context word)">
+                <el-input-number v-model="form.score_context_boost" :min="0" :max="2" :step="0.1" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+          <p class="field-hint">
+            No-context score = base; with-context = base + boost. Each rung maps
+            a score → an action (evaluated high → low).
+          </p>
+          <el-form-item label="Action Ladder">
+            <div v-for="(rung, index) in form.actions" :key="index" class="rule-row">
+              <span class="ladder-ge">&ge;</span>
+              <el-input-number
+                v-model="rung.min_score"
+                :min="0"
+                :max="2"
+                :step="0.1"
+                style="width: 130px"
+              />
+              <span class="ladder-arrow">&rarr;</span>
+              <el-select v-model="rung.action" style="width: 160px">
+                <el-option
+                  v-for="a in constants.actions"
+                  :key="a"
+                  :label="a.toUpperCase()"
+                  :value="a"
+                />
+              </el-select>
+              <el-button
+                type="danger"
+                :icon="Delete"
+                circle
+                size="small"
+                @click="form.actions.splice(index, 1)"
+                :disabled="form.actions.length <= 1"
+              />
+            </div>
+            <el-button
+              type="primary"
+              link
+              :icon="Plus"
+              @click="form.actions.push({ min_score: 0, action: 'allow_log' })"
+            >
+              Add Rung
+            </el-button>
+          </el-form-item>
         </div>
 
         <el-form-item label="Description" class="mt-4">
@@ -316,6 +373,12 @@ const handleExport = (format) => {
 // Metadata constants from Backend
 const constants = ref({ actions: [], channels: [], rule_types: [] });
 
+// Canonical new-policy ladder: format + context -> block, format only -> allow_log.
+const defaultActions = () => [
+  { min_score: 1.0, action: "block" },
+  { min_score: 0.0, action: "allow_log" },
+];
+
 const form = ref({
   id: null,
   name: "",
@@ -324,7 +387,10 @@ const form = ref({
   patterns: [""],
   keywords: [""],
   channels: ["browser", "clipboard", "peripheral_storage"],
-  action: "block",
+  user_message: "",
+  score_base: 0.5,
+  score_context_boost: 0.5,
+  actions: defaultActions(),
   context_words: [],
   context_range: 0,
   is_active: true,
@@ -334,7 +400,7 @@ const form = ref({
 // Each field: { key, label, widget ("list" | "number"), placeholder, ... }
 const RULE_FIELDS = {
   regex: [
-    { key: "patterns", label: "Patterns", widget: "list", placeholder: "Regex pattern (e.g. \\b4[0-9]{3}...\\b)", addLabel: "Add Pattern" },
+    { key: "patterns", label: "Patterns", widget: "list", placeholder: "Regex pattern (e.g. \\b4[0-9]{3}...\\b)", addLabel: "Add Pattern", hint: "Enter the raw regex with SINGLE backslashes, e.g. \\b\\d{12}\\b. Do NOT double-escape: \\\\b stores a literal backslash and never matches." },
     { key: "context_words", label: "Context Words", widget: "list", placeholder: "Context word (e.g. credit card)", addLabel: "Add Context Word" },
     { key: "context_range", label: "Context Range (characters)", widget: "number", min: 0, max: 1000, step: 10, hint: "How many characters around the match to check for context words. 0 = disabled." },
   ],
@@ -411,6 +477,13 @@ const handleOpenDialog = (row = null) => {
       channels: row.channels?.length > 0 ? [...row.channels] : [],
       context_words: row.context_words?.length > 0 ? [...row.context_words] : [],
       context_range: row.context_range || 0,
+      user_message: row.user_message || "",
+      score_base: row.score_base ?? 0.5,
+      score_context_boost: row.score_context_boost ?? 0.5,
+      actions:
+        row.actions?.length > 0
+          ? row.actions.map((r) => ({ ...r }))
+          : defaultActions(),
     };
   } else {
     isEdit.value = false;
@@ -421,7 +494,10 @@ const handleOpenDialog = (row = null) => {
       patterns: [""],
       keywords: [""],
       channels: ["browser", "clipboard", "peripheral_storage"],
-      action: "block",
+      user_message: "",
+      score_base: 0.5,
+      score_context_boost: 0.5,
+      actions: defaultActions(),
       context_words: [],
       context_range: 0,
       is_active: true,
@@ -443,6 +519,27 @@ const handleSubmit = async () => {
     payload.patterns = [];
   }
   payload.context_words = payload.context_words.filter((c) => c.trim());
+
+  // Action ladder: keep complete rungs, ordered high -> low by min_score.
+  payload.actions = (payload.actions || [])
+    .filter((r) => r.action != null && r.min_score != null)
+    .map((r) => ({ min_score: Number(r.min_score), action: r.action }))
+    .sort((a, b) => b.min_score - a.min_score);
+
+  // Guard: a pattern with a double backslash is almost always a YAML-escaped form
+  // copied by mistake (it stores a literal "\" and never matches). Warn, don't block.
+  if (payload.type === "regex" && payload.patterns.some((p) => p.includes("\\\\"))) {
+    try {
+      await ElMessageBox.confirm(
+        'A pattern contains a double backslash ("\\\\"). Enter the raw regex with single backslashes (e.g. \\b\\d{12}\\b); a double backslash usually means it was copied with YAML escaping and will NOT match. Save anyway?',
+        "Possible double-escaped pattern",
+        { confirmButtonText: "Save anyway", cancelButtonText: "Go back & fix", type: "warning" }
+      );
+    } catch {
+      submitting.value = false;
+      return; // user chose to fix it
+    }
+  }
 
   try {
     if (isEdit.value) {
@@ -558,6 +655,20 @@ const getActionType = (action) => {
   };
   return map[action?.toLowerCase()] || "info";
 };
+
+// The strongest rung's action (highest min_score) — shown as the list ACTION tag.
+const topAction = (row) => {
+  const acts = row.actions || [];
+  if (!acts.length) return "allow";
+  return [...acts].sort((a, b) => b.min_score - a.min_score)[0].action;
+};
+
+// Full ladder as a tooltip, e.g. "≥1 block · ≥0 allow_log".
+const ladderSummary = (row) => {
+  const acts = [...(row.actions || [])].sort((a, b) => b.min_score - a.min_score);
+  if (!acts.length) return "no ladder";
+  return acts.map((r) => `≥${r.min_score} ${r.action}`).join(" · ");
+};
 </script>
 
 <style scoped>
@@ -587,6 +698,12 @@ const getActionType = (action) => {
   margin-left: 12px;
   font-size: 12px;
   color: #94a3b8;
+}
+.field-hint-block {
+  display: block;
+  margin-left: 0;
+  margin-top: 6px;
+  line-height: 1.4;
 }
 .mt-4 {
   margin-top: 16px;

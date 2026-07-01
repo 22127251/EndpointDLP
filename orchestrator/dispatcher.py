@@ -153,6 +153,22 @@ class Dispatcher:
         meta = request.get("metadata") or {}
         name = meta.get("filename") or os.path.basename(request.get("file_path") or "") or None
         url = meta.get("url") or None
+
+        # Build the per-policy match list ONCE and feed BOTH events.jsonl and the cloud
+        # bridge, so the server's violation log is a faithful mirror of the audit log.
+        # context_words_triggered = the distinct words that boosted a match (NOT the
+        # policy's full context list).
+        matches = [
+            {"policy_id": getattr(v, "policy_id", None),
+             "action": getattr(v, "action", ""),
+             "count": len(getattr(v, "matches", []) or []),
+             "with_context": sum(
+                 1 for m in (getattr(v, "matches", []) or [])
+                 if getattr(m, "has_context", False)
+             ),
+             "context_words_triggered": list(getattr(v, "context_words", []) or [])}
+            for v in violations
+        ]
         try:
             record_decision(
                 channel=channel,
@@ -160,17 +176,7 @@ class Dispatcher:
                 name=name,
                 url=url,
                 decision=decision,
-                violations=[
-                    {"policy_id": getattr(v, "policy_id", "?"),
-                     "count": len(getattr(v, "matches", []) or []),
-                     "action": getattr(v, "action", ""),
-                     "with_context": sum(
-                         1 for m in (getattr(v, "matches", []) or [])
-                         if getattr(m, "has_context", False)
-                     ),
-                     "context_words": list(getattr(v, "context_words", []) or [])}
-                    for v in violations
-                ],
+                violations=matches,
                 elapsed_ms=elapsed_ms,
                 req_id=req_id,
                 superseded=superseded,
@@ -179,25 +185,23 @@ class Dispatcher:
         except Exception as exc:  # noqa: BLE001 — audit logging must never break a decision
             log.warning("event log failed for req=%s: %s", req_id, exc)
 
-        # Cloud bridge: report violations to management console (non-blocking)
-        if violations and self._violation_callback is not None:
+        # Cloud bridge: report any NOTABLE decision — a policy match OR a failure
+        # `reason` (so fail_open allows and fail_closed blocks are reported too, not
+        # just policy blocks). A clean ALLOW (no match, no reason) is not sent.
+        # agent_id is filled by CloudBridge.
+        if self._violation_callback is not None and (matches or reason):
             try:
                 self._violation_callback({
-                    "agent_id": "",  # filled by CloudBridge
                     "channel": channel,
-                    "action": "block",
+                    "decision": decision,
+                    "reason": reason,
                     "details": {
                         "req_id": req_id,
-                        "file_path": request.get("file_path", ""),
-                        "filename": name or "",
+                        "name": name or "",
                         "url": url or "",
                         "elapsed_ms": round(elapsed_ms, 1),
-                        "violations": [
-                            {"policy_id": getattr(v, "policy_id", "?"),
-                             "count": len(getattr(v, "matches", []) or [])}
-                            for v in violations
-                        ],
                     },
+                    "matches": matches,
                 })
             except Exception:
                 log.debug("violation callback failed", exc_info=True)

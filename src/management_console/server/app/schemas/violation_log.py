@@ -1,28 +1,47 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from uuid import UUID
 from datetime import datetime
 
-class ViolationLogCreate(BaseModel):
-    agent_id: UUID
-    policy_id: UUID
-    channel: str = "all"
+
+class ViolationPolicyMatchCreate(BaseModel):
+    """One triggered policy in a violation event (mirrors an events.jsonl
+    ``violations`` entry)."""
+    policy_id: UUID | None = None
     action: str = "block"
-    details: dict = Field(
-        ...,
-        min_length=1,
-        max_length=500,
-        example={
-          "file_path": "/path/to/example.txt", "file_name" : "example.txt", "matched_content": "sensitive data"
-        }
-    )
+    count: int = 0
+    with_context: int = 0
+    context_words_triggered: list[str] = []
 
 
-class ViolationLogResponse(ViolationLogCreate):
+class ViolationLogCreate(BaseModel):
+    """One notable agent decision. Recorded iff it has matches or a ``reason``."""
+    agent_id: UUID
+    channel: str = "all"
+    decision: str = "BLOCK"           # BLOCK | ALLOW
+    reason: str | None = None
+    details: dict = {}                # {req_id, name, url, elapsed_ms}
+    matches: list[ViolationPolicyMatchCreate] = []
+
+
+class ViolationPolicyMatchResponse(BaseModel):
+    id: UUID
+    policy_id: UUID | None = None
+    policy_name: str | None = None
+    action: str
+    count: int = 0
+    with_context: int = 0
+    context_words_triggered: list[str] = []
+    model_config = {"from_attributes": True}
+
+
+class ViolationLogResponse(BaseModel):
     id: UUID
     agent_id: UUID
-    policy_id: UUID
+    agent_hostname: str | None = None
     channel: str
-    action: str
-    details: dict
+    decision: str
+    reason: str | None = None
+    details: dict = {}
+    matches: list[ViolationPolicyMatchResponse] = []
     created_at: datetime
     model_config = {"from_attributes": True}

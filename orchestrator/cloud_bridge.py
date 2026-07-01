@@ -23,6 +23,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -31,33 +32,60 @@ from orchestrator.config import OrchestratorConfig
 log = logging.getLogger(__name__)
 
 
+def _valid_uuid_or_none(value: Any) -> str | None:
+    """Return *value* as a canonical UUID string, or None if it isn't one. In cloud
+    mode every policy id is a server UUID; this guards against any stray non-UUID id
+    (which would make the server reject the whole violation event with 422)."""
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _strip_control_chars(items: list) -> list[str]:
+    """Remove C0 control chars (``\\x00``-``\\x1f``) from each string. Defense in depth
+    behind the server's create/update guard: a pre-existing stored backspace would
+    otherwise round-trip into policies.yaml and corrupt the analyzer's regex
+    (conflict #2). Legitimate escapes (``\\b``/``\\d``) are backslash+letter and pass."""
+    return ["".join(ch for ch in str(s) if ord(ch) >= 0x20) for s in (items or [])]
+
+
 def translate_policies(server_policies: list[dict]) -> dict:
     """Convert server policy format to local analyzer/policies.yaml format.
 
-    Server now uses the same fields as local policies.yaml:
-    - type, patterns, keywords, channels, action, context_words, context_range
-    So translation is mostly a pass-through with minor cleanup.
+    Emits the confidence-score ladder (``score_base``/``score_context_boost``/
+    ``actions``) + ``user_message`` so ``load_policies`` builds a real action ladder
+    (server policies now actually enforce — was: always ALLOW). Maps the server-only
+    ``keyword`` rule type to the analyzer's ``denylist`` (the engine knows only
+    regex|denylist). Strips C0 control chars from patterns/keywords/context_words.
     """
     local_policies = []
     for p in server_policies:
         if not p.get("is_active", True):
             continue
+        rule_type = p.get("type", "regex")
+        if rule_type == "keyword":
+            rule_type = "denylist"
         local: dict[str, Any] = {
             "id": str(p["id"]),
             "name": p.get("name", ""),
+            "user_message": p.get("user_message", "") or "",
             "channels": p.get("channels", []),
-            "action": p.get("action", "allow"),
-            "type": p.get("type", "regex"),
+            "type": rule_type,
         }
-        # Pass through patterns/keywords based on rule type
-        rule_type = local["type"]
         if rule_type == "regex":
-            local["patterns"] = p.get("patterns", [])
-        elif rule_type in ("denylist", "keyword"):
-            local["keywords"] = p.get("keywords", [])
-        # Context matching
-        local["context_words"] = p.get("context_words", [])
+            local["patterns"] = _strip_control_chars(p.get("patterns", []))
+        else:  # denylist
+            local["keywords"] = _strip_control_chars(p.get("keywords", []))
+        local["context_words"] = _strip_control_chars(p.get("context_words", []))
         local["context_range"] = p.get("context_range", 0)
+        # Score ladder (the sole action mechanism). `actions` is already
+        # [{min_score, action}, ...] — the exact shape load_policies reads.
+        local["score_base"] = p.get("score_base", 0.5)
+        local["score_context_boost"] = p.get("score_context_boost", 0.5)
+        local["actions"] = p.get("actions", []) or []
         local_policies.append(local)
     return {"policies": local_policies}
 
@@ -333,16 +361,21 @@ class CloudBridge:
             log.warning("Violation queue full, dropping event")
 
     def _violation_worker(self) -> None:
-        """Background thread consuming violation queue and POSTing to server."""
+        """Background thread consuming the violation queue and POSTing one event per
+        decision. Fills agent_id (the server requires it) and coerces each match's
+        policy_id to a valid UUID or null (a non-UUID id would 422 the whole event)."""
         while not self._stop.is_set():
             try:
-                violation = self._violation_queue.get(timeout=1.0)
+                event = self._violation_queue.get(timeout=1.0)
             except Exception:
                 continue
             try:
+                event["agent_id"] = self._agent_id
+                for m in event.get("matches", []):
+                    m["policy_id"] = _valid_uuid_or_none(m.get("policy_id"))
                 status, _ = self._post(
                     "/api/v1/violation-logs/",
-                    violation,
+                    event,
                     timeout=5,
                 )
                 if status not in (200, 201):

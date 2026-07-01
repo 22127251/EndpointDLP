@@ -43,11 +43,11 @@ def record_decision(
     reason: str | None = None,
 ) -> None:
     """Emit one audit line. ``violations`` is a list of
-    ``{"policy_id","count","action","with_context","context_words"}`` objects —
-    count = matches for that policy, action = the strongest action it resolved to,
+    ``{"policy_id","action","count","with_context","context_words_triggered"}`` objects
+    — count = matches for that policy, action = the strongest action it resolved to,
     with_context = how many matches had a confidence-boosting context word, and
-    context_words = the distinct context words that triggered those boosts (generic
-    terms only — never the matched value).
+    context_words_triggered = the distinct context words that triggered those boosts
+    (generic terms only — never the matched value; NOT the policy's full context list).
 
     ``reason`` is the stable machine category behind a BLOCK — ``policy_violation``
     for a real policy hit, or one of ``oversize`` / ``text_cap`` /
